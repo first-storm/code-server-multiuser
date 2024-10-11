@@ -1,0 +1,18 @@
+[package]
+name = "code-server-multiuser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.0"
+tokio = { version = "1", features = ["full"] }
+actix-files = "0.6.6"
+rand = "0.8.5"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+chrono = "0.4.38"
+once_cell = "1.20.2"
+bcrypt = "0.15.1"
+log = "0.4"
+env_logger = "0.11.5"
+tera = "1.14"
