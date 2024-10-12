@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    networks:
+      - traefik-network
+    ports:
+      - "83:80"
+      - "8083:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /root/traefik/traefik.yml:/traefik.yml:ro
+      - /root/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    command:
+      - --configFile=/traefik.yml
+
+networks:
+  traefik-network:
+    external: true
