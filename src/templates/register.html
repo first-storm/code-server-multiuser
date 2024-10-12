@@ -37,8 +37,13 @@
                 <!-- 成功信息 -->
                 {% if success_message %}
                 <div class="alert alert-success" role="alert">
-                    {{ success_message }}
+                    {{ success_message }} 您将在 5 秒后跳转到登录页面。
                 </div>
+                <script>
+                    setTimeout(function(){
+                        window.location.href = '/login';
+                    }, 5000);
+                </script>
                 {% endif %}
 
                 <form action="/register" method="post">
