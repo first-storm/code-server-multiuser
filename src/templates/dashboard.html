@@ -26,6 +26,21 @@
         <div class="col-md-6 offset-md-3">
             <div class="user-info">
                 <h2 class="text-center mb-4">用户信息</h2>
+
+                <!-- 警告框（红色），仅当传递了警告消息时显示 -->
+                {% if warning %}
+                <div class="alert alert-danger" role="alert">
+                    {{ warning }}
+                </div>
+                {% endif %}
+
+                <!-- 通知框（绿色），仅当传递了通知消息时显示 -->
+                {% if notification %}
+                <div class="alert alert-success" role="alert">
+                    {{ notification }}
+                </div>
+                {% endif %}
+
                 <div class="mb-3">
                     <label class="form-label">用户名:</label>
                     <p class="form-control">{{ username }}</p>
@@ -34,6 +49,19 @@
                     <label class="form-label">邮箱:</label>
                     <p class="form-control">{{ email }}</p>
                 </div>
+
+                <!-- 新增服务器状态条目 -->
+                <div class="mb-3">
+                    <label class="form-label">服务器状态:</label>
+                    <p class="form-control">
+                        {% if container_stat == "on" %}
+                        服务器正在运行
+                        {% else %}
+                        服务器没有运行
+                        {% endif %}
+                    </p>
+                </div>
+
                 <div class="d-grid">
                     <form action="/logout" method="get">
                         <button type="submit" class="btn btn-danger">登出</button>

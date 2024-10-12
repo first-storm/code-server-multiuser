@@ -2,18 +2,18 @@ mod user;
 mod storage;
 mod traefik;
 
-use std::fs::File;
-use std::io;
-use std::io::BufRead;
 use crate::user::UserDB;
-use actix_web::cookie::{CookieBuilder};
+use actix_web::cookie::CookieBuilder;
+use actix_web::rt::signal;
 use actix_web::{cookie, web, App, HttpResponse, HttpServer};
 use log::{error, info, warn};
 use serde::Deserialize;
+use std::fs::File;
+use std::io;
+use std::io::BufRead;
 use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
-use actix_web::rt::signal;
 use tera::{Context, Tera};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -340,7 +340,14 @@ async fn dashboard(
             let mut context = Context::new();
             context.insert("username", &user.username);  // Insert username into the context
             context.insert("email", &user.email);        // Insert email into the context
-
+            match UserDB::is_container_running(format!("{}", user.uid).as_str()) {
+                Ok(true) => context.insert("container_stat", "on"),
+                Ok(false) => context.insert("container_stat", "off"),
+                Err(e) => {
+                    context.insert("warning", format!("容器状态异常。请联系管理员。\n错误信息：{}", e).as_str());
+                    context.insert("container_stat", "off");
+                },
+            };
 
             // Render the dashboard.html template
             let rendered = tera
