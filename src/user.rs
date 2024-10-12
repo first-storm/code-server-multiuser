@@ -260,7 +260,7 @@ impl UserDB {
 
         // Run Docker command to create the container without starting it
         let output = Command::new("docker")
-            .arg("create") // Use "create" instead of "run"
+            .arg("create")
             .arg("--name")
             .arg(format!("{}.codeserver", uid))
             .arg("-v")
@@ -275,11 +275,15 @@ impl UserDB {
             .arg(format!("DOCKER_USER={}", user))
             .arg("-e")
             .arg(format!("PASSWORD={}", password))
+            .arg("-e")
+            .arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#)
             .arg("--storage-opt")
             .arg("size=1G")
             .arg("--network")
             .arg("traefik-network")
             .arg("codercom/code-server:latest")
+            .arg("--auth")
+            .arg("none")
             .output()?;
 
 
