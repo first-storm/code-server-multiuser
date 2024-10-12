@@ -62,7 +62,22 @@
                     </p>
                 </div>
 
+                <!-- 根据服务器状态显示不同的按钮 -->
+                {% if container_stat == "on" %}
                 <div class="d-grid">
+                    <a href="/ide" class="btn btn-primary">进入IDE</a>
+                </div>
+                {% else %}
+                <div class="d-grid">
+                    <button class="btn btn-secondary" disabled>服务未运行</button>
+                </div>
+                <!-- 红色提示 -->
+                <div class="alert alert-danger mt-3" role="alert">
+                    请尝试重新登录，或联系管理员。
+                </div>
+                {% endif %}
+
+                <div class="d-grid mt-3">
                     <form action="/logout" method="get">
                         <button type="submit" class="btn btn-danger">登出</button>
                     </form>
