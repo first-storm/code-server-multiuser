@@ -277,8 +277,11 @@ impl UserDB {
             .arg(format!("PASSWORD={}", password))
             .arg("--storage-opt")
             .arg("size=1G")
+            .arg("--network")
+            .arg("traefik-network")
             .arg("codercom/code-server:latest")
             .output()?;
+
 
         if output.status.success() {
             info!("Successfully created container for UID: {}", uid);
