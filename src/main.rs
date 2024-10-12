@@ -15,6 +15,30 @@ use tera::{Context, Tera};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_web::Error> {
+    let db_file_path = storage::USERDB.as_str();
+
+    info!("Reloading database from file: {}", db_file_path);
+
+    let new_db = match UserDB::read_from_file(db_file_path) {
+        Ok(db) => db,
+        Err(_) => {
+            error!("Failed to reload database from file: {}", db_file_path);
+            return Ok(HttpResponse::InternalServerError().body("Failed to reload database."));
+        }
+    };
+
+    // Lock the current database and replace it with the reloaded one
+    {
+        let mut db_lock = db.lock().await;
+        *db_lock = new_db;
+    }
+
+    info!("Database reloaded successfully from file: {}", db_file_path);
+    Ok(HttpResponse::Ok().body("Database reloaded successfully."))
+}
+
+
 /// Renders the login page. If there is a message (e.g., login failed), it will be passed to the template.
 async fn login_page(
     tera: web::Data<Tera>,
@@ -364,6 +388,7 @@ async fn main() -> std::io::Result<()> {
             .route("/register", web::post().to(register)) // Handle POST requests for registration form
             .route("/dashboard", web::get().to(dashboard))
             .route("/logout", web::get().to(logout))
+            .route("/reloaddb", web::get().to(reload_db))
             .default_service(web::route().to(page_404)) // Default handler for 404 pages
     })
         .bind("127.0.0.1:8080")?
