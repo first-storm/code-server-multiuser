@@ -391,41 +391,43 @@ impl UserDB {
 
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        let mut expired_user_uids = Vec::new();
+        // Collect a list of user UIDs to log out to avoid mutable/immutable borrow conflicts
+        let expired_user_uids: Vec<isize> = self
+            .users
+            .iter()
+            .filter_map(|user| {
+                let heartbeat_path = format!(
+                    "{}{}.data/.local/share/code-server/heartbeat",
+                    *USERDB,
+                    user.uid
+                );
 
-        for user in self.users.iter_mut() {
-            let heartbeat_path = format!(
-                "{}{}.data/.local/share/code-server/heartbeat",
-                *USERDB,
-                user.uid
-            );
-
-            if let Ok(metadata) = std::fs::metadata(&heartbeat_path) {
-                if let Ok(modified_time) = metadata.modified() {
-                    let now = SystemTime::now();
-
-                    if let Ok(duration) = now.duration_since(modified_time) {
-                        let elapsed_secs = duration.as_secs();
-                        if elapsed_secs > 1200 {
-                            info!("Stopping expired container for user: {}", user.username);
-                            expired_user_uids.push(user.uid.clone());
-                            user.token = None; // 清空过期用户的 Token
-                            info!("Cleared token for user: {}", user.username);
+                if let Ok(metadata) = std::fs::metadata(&heartbeat_path) {
+                    if let Ok(modified_time) = metadata.modified() {
+                        if let Ok(duration) = SystemTime::now().duration_since(modified_time) {
+                            if duration.as_secs() > 1200 {
+                                info!(
+                                "User '{}' has been idle for too long. Marking for logout.",
+                                user.username
+                            );
+                                return Some(user.uid); // Collect UID for logout
+                            }
                         }
                     }
                 }
-            }
-        }
+                None
+            })
+            .collect();
 
-        // Now, you can call self.stop_container without borrowing conflicts
+        // Log out the expired users in a second loop to avoid borrowing conflicts
         for uid in expired_user_uids {
-            match self.stop_container(&format!("{}.codeserver", uid)) {
-                Ok(()) => info!("Successfully stopped container for uid: {}", uid),
-                Err(e) => { error!("Failed to stop container for uid: {},{}", uid,e); },
+            if let Err(e) = self.logout(uid) {
+                error!("Failed to log out user with UID {}: {}", uid, e);
+            } else {
+                info!("Successfully logged out user with UID {}", uid);
             }
         }
     }
-
 
     /// Writes the current user database to a file in JSON format.
     pub fn write_to_file(&self) -> Result<(), Box<dyn Error>> {
