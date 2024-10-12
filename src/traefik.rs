@@ -29,16 +29,18 @@ impl Instances {
     }
 
     pub fn add(&mut self, instance: Instance) -> Result<(), io::Error> {
-        // Check if an instance with the same name exists
+        // Check if an instance with the same name already exists
         if let Some(existing_instance) = self.instances.iter_mut().find(|i| i.name == instance.name) {
             // Update the token of the existing instance
-            existing_instance.token = instance.token.clone();
+            existing_instance.token = instance.token;
         } else {
-            // If no instance with the same name exists, add the new instance
+            // Add the new instance if no existing instance with the same name is found
             self.instances.push(instance);
         }
+        // Save the updated configuration
         self.save_config()
     }
+
 
     pub fn remove(&mut self, instance_token: &str) -> Result<(), io::Error> {
         self.instances.retain(|i| i.token != instance_token);
@@ -57,6 +59,7 @@ impl Instances {
         Ok(())
     }
 
+
     fn generate_traefik_config(&self) -> String {
         // Generate the content of the Traefik dynamic configuration file based on the current instances
         let mut config = DynamicConfig {
@@ -67,7 +70,7 @@ impl Instances {
         };
         for instance in &self.instances {
             let router = Router {
-                rule: format!("HeaderRegexp(`Cookie`, `auth_token={}`)", instance.token),
+                rule: format!("HeaderRegexp(Cookie, auth_token={})", instance.token),
                 service: format!("{}-service", instance.name),
                 entryPoints: vec![String::from("web")],
             };
@@ -79,14 +82,8 @@ impl Instances {
                     passHostHeader: true,
                 },
             };
-            config
-                .http
-                .services
-                .insert(format!("{}-service", instance.name), service);
-            config
-                .http
-                .routers
-                .insert(format!("{}-router", instance.name), router);
+            config.http.services.insert(format!("{}-service", instance.name), service);
+            config.http.routers.insert(format!("{}-router", instance.name), router);
         }
         // Serialize to a string and return
         serde_yml::to_string(&config).unwrap_or_else(|_| String::new())
