@@ -20,3 +20,7 @@ pub static TEMPLATES: Lazy<String> = Lazy::new(|| {
 pub static UID_WHITELIST: Lazy<String> = Lazy::new(|| {
     env::var("UID_WHITELIST").expect("Environment variable 'UID_WHITELIST' not set")
 });
+
+pub static DOMAIN: Lazy<String> = Lazy::new(|| {
+    env::var("DOMAIN").expect("Environment variable 'DOMAIN' not set")
+});

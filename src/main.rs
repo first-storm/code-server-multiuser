@@ -17,6 +17,7 @@ use std::time::Duration;
 use tera::{Context, Tera};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use crate::storage::DOMAIN;
 
 async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_web::Error> {
     let db_file_path = storage::USERDB.as_str();
@@ -292,9 +293,9 @@ async fn login(
             // On successful login, generate a cookie and set the token
             info!("User {} logged in successfully.", username);
 
-            // Create a Cookie, set Domain to *.code.cocoabrew.cc, and mark as HttpOnly and Secure
+            // Create a Cookie, set Domain to DOMAIN, and mark as HttpOnly and Secure
             let cookie = CookieBuilder::new("auth_token", token)
-                .domain(".code.cocoabrew.cc")
+                .domain(DOMAIN.to_string())
                 .path("/")
                 .http_only(true)
                 .secure(true)
