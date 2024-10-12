@@ -61,7 +61,7 @@ impl Instances {
         };
         for instance in &self.instances {
             let router = Router {
-                rule: format!("Headers(`Cookie`, `auth_token={}`)", instance.token),
+                rule: format!("Header(`Cookie`, `auth_token={}`)", instance.token),
                 service: format!("{}-service", instance.name),
                 entryPoints: vec![String::from("web")],
             };
