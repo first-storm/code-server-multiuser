@@ -1,4 +1,6 @@
+use super::traefik;
 use crate::storage::{DATADIR, USERDB};
+use crate::traefik::Instance;
 use bcrypt::{hash, verify};
 use log::{error, info, warn};
 use rand::{distributions::Alphanumeric, Rng};
@@ -9,8 +11,6 @@ use std::io::{BufReader, BufWriter, ErrorKind};
 use std::process::Command;
 use std::time::SystemTime;
 use std::{env, fmt, io};
-use crate::traefik::Instance;
-use super::traefik;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
@@ -22,7 +22,7 @@ pub struct User {
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserDB {
-    traefik_instances: traefik::Instances,
+    pub(crate) traefik_instances: traefik::Instances,
     users: Vec<User>,
     file_path: String,
 }
@@ -69,7 +69,7 @@ impl UserDB {
     pub fn new(file_path: &str) -> UserDB {
         info!("Creating a new user database with file path: {}", file_path);
         let udb = UserDB {
-            traefik_instances: traefik::Instances::new(file_path.to_string()),
+            traefik_instances: traefik::Instances::new(),
             users: Vec::new(),
             file_path: file_path.to_string(),
         };
@@ -136,7 +136,14 @@ impl UserDB {
         // Now, you can safely call methods that require mutable borrow of 'self'
         if is_running {
             info!("Stopping container for user: {}", username);
-            self.stop_container(&container_id);
+            match self.stop_container(&container_id) {
+                Ok(()) => info!("Successfully stopped container for user: {}", username),
+                Err(e) => { error!("Failed to stop container for user {}: {}", username, e); },
+            }
+            match self.traefik_instances.remove(&container_id) {
+                Ok(_) => { info!("Successfully stopped traefik proxy for user: {}", username); },
+                Err(e) => { error!("Failed to stop traefik proxy {}: {}", username, e); }
+            }
         } else {
             info!("Container is not running for user: {}", username);
         }
@@ -192,7 +199,10 @@ impl UserDB {
             Ok(false) => {
                 // If the container is not running, start it
                 info!("Starting container for user: {}", username);
-                self.start_container(&format!("{}.codeserver", uid), &*token);
+                match self.start_container(&format!("{}.codeserver", uid), &*token) {
+                    Ok(()) => info!("Successfully started container for user: {}", username),
+                    Err(e) => { error!("Failed to start container for user {}: {}", username, e); },
+                }
             }
             Err(e) => {
                 error!("Failed to check container status for user {}: {}", username, e);
@@ -281,49 +291,58 @@ impl UserDB {
 
 
     /// Stops a Docker container by its container ID.
-    fn stop_container(&mut self, container_id: &str) {
+    /// Stops a Docker container by its container ID.
+    fn stop_container(&mut self, container_id: &str) -> io::Result<()> {
         let output = Command::new("docker")
             .arg("stop")
             .arg(container_id)
-            .output()
-            .expect("Failed to execute process");
+            .output()?;
 
         if output.status.success() {
             info!("Successfully stopped container: {}", container_id);
+            Ok(())
         } else {
-            error!(
+            let error_message = format!(
                 "Failed to stop container: {}. Error: {}",
                 container_id,
                 String::from_utf8_lossy(&output.stderr)
             );
+            error!("{}", error_message);
+            Err(io::Error::new(ErrorKind::Other, error_message))
         }
     }
 
     /// Starts a Docker container by its container ID.
-    fn start_container(&mut self, container_id: &str,token: &str) {
+    fn start_container(&mut self, container_id: &str, token: &str) -> io::Result<()> {
         let output = Command::new("docker")
             .arg("start")
             .arg(container_id)
-            .output()
-            .expect("Failed to execute process");
-        
-        self.traefik_instances.add(Instance{
-            name: container_id.to_string(),
-            token: token.to_string(),
-            
-        });
-
+            .output()?;
 
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
+
+            if let Err(e) = self.traefik_instances.add(Instance {
+                name: container_id.to_string(),
+                token: token.to_string(),
+            }) {
+                let error_message = format!("Failed to add traefik instance: {}", e);
+                error!("{}", error_message);
+                return Err(io::Error::new(ErrorKind::Other, error_message));
+            }
+
+            Ok(())
         } else {
-            error!(
+            let error_message = format!(
                 "Failed to start container: {}. Error: {}",
                 container_id,
                 String::from_utf8_lossy(&output.stderr)
             );
+            error!("{}", error_message);
+            Err(io::Error::new(ErrorKind::Other, error_message))
         }
     }
+
     pub fn is_container_running(uid: &str) -> io::Result<bool> {
         // Construct the container ID/name based on the UID
         let container_id = format!("{}.codeserver", uid);
@@ -379,7 +398,10 @@ impl UserDB {
 
         // Now, you can call self.stop_container without borrowing conflicts
         for uid in expired_user_uids {
-            self.stop_container(&format!("{}.codeserver", uid));
+            match self.stop_container(&format!("{}.codeserver", uid)) {
+                Ok(()) => info!("Successfully stopped container for uid: {}", uid),
+                Err(e) => { error!("Failed to stop container for uid: {},{}", uid,e); },
+            }
         }
     }
 
@@ -413,6 +435,35 @@ impl UserDB {
         for user in &self.users {
             info!("{:?}", user);
         }
+    }
+
+    /// Logs out all users by stopping their containers and clearing their tokens.
+    pub fn logout_all_users(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut container_ids = Vec::new();
+
+        // Iterate over all users, collect container IDs, and clear tokens
+        for user in self.users.iter_mut() {
+            let container_id = format!("{}.codeserver", user.uid);
+            container_ids.push(container_id.clone());
+
+            // Clear the user's token
+            user.token = None;
+            info!("Logged out user: {}", user.username);
+        }
+
+        // Now, stop all containers
+        for container_id in container_ids {
+            info!("Stopping container: {}", container_id);
+            match self.stop_container(&container_id) {
+                Ok(()) => info!("Successfully stopped container id: {}", container_id),
+                Err(e) => { error!("Failed to stop container {}: {}", container_id, e); },
+            }
+        }
+
+        // Write the updated database to file
+        self.write_to_file()?;
+
+        Ok(())
     }
 
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {

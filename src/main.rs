@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
+use actix_web::rt::signal;
 use tera::{Context, Tera};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -314,6 +315,7 @@ async fn expiration_checker(db: SharedUserDB) {
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     info!("Starting server...");
+
     let tera = Tera::new(format!("{}/**/*", storage::TEMPLATES.as_str()).as_str())
         .unwrap_or_else(|e| {
             error!("Error initializing Tera templates: {}", e);
@@ -338,8 +340,21 @@ async fn main() -> std::io::Result<()> {
     // Spawn a background task for container expiration checking
     tokio::spawn(expiration_checker(shared_database.clone()));
 
+    // Handle the server shutdown signal
+    let shared_db_clone = shared_database.clone(); // Clone shared database for shutdown handler
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+
+        // Perform the shutdown procedure (save the database, etc.)
+        shutdown_procedure(shared_db_clone).await;
+
+        // Gracefully exit after shutdown tasks are done
+        info!("Server is shutting down.");
+        exit(0);  // Exit after completing the shutdown
+    });
+
     // Start the HTTP server and share the database
-    HttpServer::new(move || {
+    let srv = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(tera.clone())) // Add Tera template engine to app state
             .app_data(web::Data::new(shared_database.clone())) // Share the database
@@ -348,9 +363,38 @@ async fn main() -> std::io::Result<()> {
             .route("/register", web::get().to(register)) // Handle GET requests for registration page
             .route("/register", web::post().to(register)) // Handle POST requests for registration form
             .route("/dashboard", web::get().to(dashboard))
+            .route("/logout", web::get().to(logout))
             .default_service(web::route().to(page_404)) // Default handler for 404 pages
     })
         .bind("127.0.0.1:8080")?
         .run()
-        .await
+        .await;
+
+    srv
+}
+
+/// Gracefully shuts down the server and saves the database before exit.
+async fn shutdown_procedure(shared_db: SharedUserDB) {
+    info!("Shutting down the server...");
+
+    // Lock the database to save it
+    let mut db = shared_db.lock().await;
+    let db_file_path = storage::USERDB.as_str();
+    match &db.logout_all_users() {
+        Ok(()) => info!("All users have been successfully logged out."),
+        Err(e) => error!("Error logging out users during shutdown: {}", e),
+    }
+
+    match &db.write_to_file() {
+        Ok(_) => info!("Database has been successfully saved to {}", db_file_path),
+        Err(e) => error!("Error occurred while saving the database: {}", e),
+    }
+
+    match &db.traefik_instances.shutdown() {
+        Ok(()) => info!("Traefik instances have been successfully shut down."),
+        Err(e) => error!("Error shutting down Traefik instances: {}", e),
+    }
+
+
+    info!("Shutdown complete.");
 }
