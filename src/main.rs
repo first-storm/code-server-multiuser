@@ -281,19 +281,31 @@ async fn login(
     form: Option<web::Form<LoginForm>>,
     tera: web::Data<Tera>,
     db: web::Data<SharedUserDB>,
+    req: actix_web::HttpRequest, // Include request object to get cookies
 ) -> Result<HttpResponse, actix_web::Error> {
+    // Check if there is a valid auth_token
+    if let Some(auth_cookie) = req.cookie("auth_token") {
+        let token = auth_cookie.value();
+
+        // Lock the database and find the user
+        let db = db.lock().await;
+        if let Some(user) = db.find_user_by_token(token) {
+            // If user is found, redirect to dashboard
+            info!("User {} already logged in, redirecting to dashboard.", user.username);
+            return Ok(HttpResponse::Found()
+                .append_header(("LOCATION", "/dashboard"))
+                .finish());
+        }
+    }
+
+    // If there is no valid token or processing a form request
     if let Some(form) = form {
-        // Process POST request, handle login logic
         let LoginForm { username, password } = form.into_inner();
 
-        // Lock the database and check user credentials
         let mut db = db.lock().await;
-
         return if let Ok(token) = db.login(username.clone(), password) {
-            // On successful login, generate a cookie and set the token
             info!("User {} logged in successfully.", username);
 
-            // Create a Cookie, set Domain to DOMAIN, and mark as HttpOnly and Secure
             let cookie = CookieBuilder::new("auth_token", token)
                 .domain(DOMAIN.to_string())
                 .path("/")
@@ -302,7 +314,6 @@ async fn login(
                 .max_age(cookie::time::Duration::days(30))
                 .finish();
 
-            // Set the cookie in the response and redirect to /dashboard
             Ok(HttpResponse::Found()
                 .append_header(("LOCATION", "/dashboard"))
                 .cookie(cookie)
@@ -310,16 +321,14 @@ async fn login(
         } else {
             warn!("Failed login attempt for user: {}", username);
             let msg = "Invalid username or password.".to_string();
-
-            // Render the login page with the result message
             login_page(tera, Some(msg)).await
-        }
+        };
     }
 
-    // Render login page for GET requests or when form is None
     info!("Displaying login page.");
     login_page(tera, None).await
 }
+
 
 
 /// Renders the dashboard page for logged-in users.

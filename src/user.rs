@@ -158,7 +158,7 @@ impl UserDB {
 
 
     pub fn login(&mut self, username: String, password: String) -> Result<String, LoginError> {
-        // Find the user; to avoid mutable borrowing, first use an immutable borrow to search for the user
+        // Find user: use an immutable borrow first to avoid conflicts
         let user_exists = self
             .users
             .iter()
@@ -168,7 +168,7 @@ impl UserDB {
                 LoginError::UserNotFound
             })?;
 
-        // Validate the password
+        // Verify password
         if !verify(password, &user_exists.password).map_err(|_| LoginError::IncorrectPassword)? {
             warn!("Incorrect password for user: {}", username);
             return Err(LoginError::IncorrectPassword);
@@ -177,10 +177,10 @@ impl UserDB {
         // Generate a unique token
         let token = self.generate_unique_token();
 
-        // Store the user's UID before mutable borrow
+        // Record user UID to avoid mutable borrow conflict
         let uid = user_exists.uid.clone();
 
-        // Now find the user with a mutable borrow and update the token
+        // Find user with a mutable borrow and update the token
         {
             let user = self
                 .users
@@ -189,19 +189,32 @@ impl UserDB {
                 .expect("User should exist after the previous check");
 
             user.token = Some(token.clone()); // Set the user's token
-        } // Mutable borrow ends here
+        } // End of mutable borrow
 
-        // Check if the user's container is already running
+        // Check if the container is running
         match Self::is_container_running(&uid.to_string()) {
             Ok(true) => {
                 info!("Container is already running for user: {}", username);
+
+                // Ensure to add a Traefik instance even if the container is running
+                if let Err(e) = self.traefik_instances.add(Instance {
+                    name: format!("{}.codeserver", uid),
+                    token: token.clone(),
+                }) {
+                    let error_message = format!("Failed to add traefik instance: {}", e);
+                    error!("{}", error_message);
+                    return Err(LoginError::ContainerError(error_message));
+                }
             }
             Ok(false) => {
-                // If the container is not running, start it
+                // If the container is not running, start the container
                 info!("Starting container for user: {}", username);
-                match self.start_container(&format!("{}.codeserver", uid), &*token) {
+                match self.start_container(&format!("{}.codeserver", uid), &token) {
                     Ok(()) => info!("Successfully started container for user: {}", username),
-                    Err(e) => { error!("Failed to start container for user {}: {}", username, e); },
+                    Err(e) => {
+                        error!("Failed to start container for user {}: {}", username, e);
+                        return Err(LoginError::ContainerError(e.to_string()));
+                    }
                 }
             }
             Err(e) => {
@@ -213,6 +226,7 @@ impl UserDB {
         info!("Login successful for user: {}", username);
         Ok(token) // Return the generated token
     }
+
 
     /// Check if a username exists in the database.
     pub fn username_exists(&self, username: &str) -> bool {
