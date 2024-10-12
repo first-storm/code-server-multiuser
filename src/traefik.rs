@@ -77,6 +77,6 @@ impl Instances {
             config.http.routers.insert(format!("{}-router", instance.name), router);
         }
         // Serialize to a string and return
-        serde_json::to_string(&config).unwrap_or_else(|_| String::new())
+        serde_yml::to_string(&config).unwrap_or_else(|_| String::new())
     }
 }
