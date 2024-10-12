@@ -5,14 +5,12 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, ErrorKind};
 use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
 use std::time::SystemTime;
 use std::{env, fmt, io};
-use tokio::sync::Mutex;
-use tokio::time::sleep;
+use crate::traefik::Instance;
+use super::traefik;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
@@ -24,11 +22,10 @@ pub struct User {
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserDB {
+    traefik_instances: traefik::Instances,
     users: Vec<User>,
     file_path: String,
 }
-
-type SharedUserDB = Arc<Mutex<UserDB>>;
 
 #[derive(Debug)]
 pub enum LoginError {
@@ -72,10 +69,11 @@ impl UserDB {
     pub fn new(file_path: &str) -> UserDB {
         info!("Creating a new user database with file path: {}", file_path);
         let udb = UserDB {
+            traefik_instances: traefik::Instances::new(file_path.to_string()),
             users: Vec::new(),
             file_path: file_path.to_string(),
         };
-        udb.write_to_file();  // Write the initial empty database to file
+        udb.write_to_file().expect("Database is not writeable! Please check permission.");  // Write the initial empty database to file
         udb
     }
 
@@ -84,12 +82,74 @@ impl UserDB {
         let hashed_password = hash(&user.password, bcrypt::DEFAULT_COST)?;  // Hash the user's password
         user.password = hashed_password;
         info!("Added new user: {:?}", user.username);
-        self.users.push(user);  // Add user to the user list
+
+        // Create and start Docker container for the new user
+        if let Err(e) = Self::create_container(&user.uid.to_string(), &user.password) {
+            error!("Failed to create container for user {}: {}", user.username, e);
+            return Err(Box::new(e));
+        } else {
+            info!("Successfully created container for user: {}", user.username);
+        }
+
+        // Add user to the user list
+        self.users.push(user);
         self.write_to_file()?;  // Write updated database to file
         Ok(())
     }
 
-    /// Handles user login, container validation, and startup.
+    #[allow(dead_code)]
+    pub fn logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
+        // Variables to store user information and container status
+        let container_id;
+        let username;
+        let is_running;
+
+        // Limit the scope of the mutable borrow
+        {
+            // Find the user mutably
+            if let Some(user) = self.users.iter_mut().find(|u| u.uid == uid) {
+                // Collect necessary data
+                container_id = format!("{}.codeserver", user.uid);
+                username = user.username.clone(); // Clone to avoid borrowing after this scope
+
+                // Check if the container is running
+                is_running = match Self::is_container_running(&user.uid.to_string()) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        error!(
+                        "Failed to check if container is running for user {}: {}",
+                        user.username, e
+                    );
+                        return Err(Box::new(e));
+                    }
+                };
+
+                // Clear the user's token
+                user.token = None;
+                info!("Cleared token for user: {}", user.username);
+            } else {
+                error!("User with UID {} not found for logout", uid);
+                return Err(Box::new(LoginError::UserNotFound));
+            }
+        } // The mutable borrow of 'self.users' ends here
+
+        // Now, you can safely call methods that require mutable borrow of 'self'
+        if is_running {
+            info!("Stopping container for user: {}", username);
+            self.stop_container(&container_id);
+        } else {
+            info!("Container is not running for user: {}", username);
+        }
+
+        // Write changes to file
+        self.write_to_file()?;
+
+        Ok(())
+    }
+
+
+
+
     pub fn login(&mut self, username: String, password: String) -> Result<String, LoginError> {
         // Find the user; to avoid mutable borrowing, first use an immutable borrow to search for the user
         let user_exists = self
@@ -107,67 +167,42 @@ impl UserDB {
             return Err(LoginError::IncorrectPassword);
         }
 
-        // Generate a unique token; at this point, we haven't mutably borrowed `self`
+        // Generate a unique token
         let token = self.generate_unique_token();
 
+        // Store the user's UID before mutable borrow
+        let uid = user_exists.uid.clone();
+
         // Now find the user with a mutable borrow and update the token
-        let user = self
-            .users
-            .iter_mut()
-            .find(|u| u.username == username)
-            .expect("User should exist after the previous check");
+        {
+            let user = self
+                .users
+                .iter_mut()
+                .find(|u| u.username == username)
+                .expect("User should exist after the previous check");
 
-        user.token = Some(token.clone()); // Set the user's token
+            user.token = Some(token.clone()); // Set the user's token
+        } // Mutable borrow ends here
 
-        // Docker container logic
-        let container_id = format!("{}.codeserver", user.uid);
-        let output = Command::new("docker")
-            .arg("ps")
-            .arg("-a")
-            .arg("--filter")
-            .arg(format!("name={}", container_id))
-            .arg("--format")
-            .arg("{{.Names}}")
-            .output()
-            .map_err(|e| {
-                error!("Failed to list containers: {}", e);
-                LoginError::ContainerError(format!("Failed to list containers: {}", e))
-            })?;
-
-        let container_exists = !String::from_utf8_lossy(&output.stdout).trim().is_empty();
-
-        if container_exists {
-            let running_output = Command::new("docker")
-                .arg("inspect")
-                .arg("--format")
-                .arg("{{.State.Running}}")
-                .arg(&container_id)
-                .output()
-                .map_err(|e| {
-                    error!("Failed to check container status: {}", e);
-                    LoginError::ContainerError(format!("Failed to check container status: {}", e))
-                })?;
-
-            let is_running = String::from_utf8_lossy(&running_output.stdout).trim() == "true";
-
-            if is_running {
-                info!("Container {} is already running.", container_id);
-            } else {
-                info!("Container {} exists but is not running. Starting it.", container_id);
-                Self::start_container(&container_id);
+        // Check if the user's container is already running
+        match Self::is_container_running(&uid.to_string()) {
+            Ok(true) => {
+                info!("Container is already running for user: {}", username);
             }
-        } else {
-            info!("Container {} does not exist. Creating and starting it.", container_id);
-            if let Err(e) = Self::create_container(&user.uid.to_string(), &user.password) {
-                error!("Failed to create container for user {}: {}", username, e);
-                return Err(LoginError::ContainerError("Failed to create container".to_string()));
+            Ok(false) => {
+                // If the container is not running, start it
+                info!("Starting container for user: {}", username);
+                self.start_container(&format!("{}.codeserver", uid), &*token);
+            }
+            Err(e) => {
+                error!("Failed to check container status for user {}: {}", username, e);
+                return Err(LoginError::ContainerError(e.to_string()));
             }
         }
 
         info!("Login successful for user: {}", username);
         Ok(token) // Return the generated token
     }
-
 
     /// Check if a username exists in the database.
     pub fn username_exists(&self, username: &str) -> bool {
@@ -185,6 +220,7 @@ impl UserDB {
     }
 
     /// Retrieve a user by their username.
+    #[allow(dead_code)]
     pub fn get_user_by_username(&self, username: &str) -> Option<User> {
         info!("Searching for user: {}", username);
         for user in &self.users {
@@ -199,12 +235,12 @@ impl UserDB {
     /// Create a new Docker container for the user.
     fn create_container(uid: &str, password: &str) -> io::Result<()> {
         // Prepare environment variables and paths for Docker
-        let home = env::var("HOME").map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let home = env::var("HOME").map_err(|e| io::Error::new(ErrorKind::Other, e))?;
         let pwd = env::current_dir()?;
         let pwd_str = pwd
             .to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid current directory"))?;
-        let user = env::var("USER").map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .ok_or_else(|| io::Error::new(ErrorKind::Other, "Invalid current directory"))?;
+        let user = env::var("USER").map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         let uid_output = Command::new("id").arg("-u").output()?;
         let uid_str = String::from_utf8_lossy(&uid_output.stdout).trim().to_string();
@@ -212,12 +248,11 @@ impl UserDB {
         let gid_output = Command::new("id").arg("-g").output()?;
         let gid_str = String::from_utf8_lossy(&gid_output.stdout).trim().to_string();
 
-        // Run Docker command to create the container
+        // Run Docker command to create the container without starting it
         let output = Command::new("docker")
-            .arg("run")
-            .arg("-d")
+            .arg("create") // Use "create" instead of "run"
             .arg("--name")
-            .arg("code-server")
+            .arg(format!("{}.codeserver", uid))
             .arg("-v")
             .arg(format!("{}/{}.data/.local:{}/.local", DATADIR.as_str(), uid, home))
             .arg("-v")
@@ -240,12 +275,13 @@ impl UserDB {
             Ok(())
         } else {
             error!("Failed to create container for UID: {}. Error: {}", uid, String::from_utf8_lossy(&output.stderr));
-            Err(io::Error::new(io::ErrorKind::Other, "Docker run command failed"))
+            Err(io::Error::new(ErrorKind::Other, "Docker create command failed"))
         }
     }
 
+
     /// Stops a Docker container by its container ID.
-    fn stop_container(container_id: &str) {
+    fn stop_container(&mut self, container_id: &str) {
         let output = Command::new("docker")
             .arg("stop")
             .arg(container_id)
@@ -264,12 +300,19 @@ impl UserDB {
     }
 
     /// Starts a Docker container by its container ID.
-    fn start_container(container_id: &str) {
+    fn start_container(&mut self, container_id: &str,token: &str) {
         let output = Command::new("docker")
             .arg("start")
             .arg(container_id)
             .output()
             .expect("Failed to execute process");
+        
+        self.traefik_instances.add(Instance{
+            name: container_id.to_string(),
+            token: token.to_string(),
+            
+        });
+
 
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
@@ -281,10 +324,36 @@ impl UserDB {
             );
         }
     }
+    pub fn is_container_running(uid: &str) -> io::Result<bool> {
+        // Construct the container ID/name based on the UID
+        let container_id = format!("{}.codeserver", uid);
+
+        // Run Docker inspect command to check if the container is running
+        let output = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{.State.Running}}")
+            .arg(&container_id)
+            .output()?;
+
+        // Check if the command succeeded
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(io::Error::new(ErrorKind::Other, format!("Docker error: {}", stderr)));
+        }
+
+        // Get the output and check if it's "true" (container is running)
+        let is_running = String::from_utf8_lossy(&output.stdout).trim() == "true";
+
+        Ok(is_running)
+    }
+
 
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        self.users.iter_mut().for_each(|user| {
+        let mut expired_user_uids = Vec::new();
+
+        for user in self.users.iter_mut() {
             let heartbeat_path = format!(
                 "{}{}.data/.local/share/code-server/heartbeat",
                 *USERDB,
@@ -299,15 +368,21 @@ impl UserDB {
                         let elapsed_secs = duration.as_secs();
                         if elapsed_secs > 1200 {
                             info!("Stopping expired container for user: {}", user.username);
-                            Self::stop_container(&format!("{}.codeserver", user.uid));
+                            expired_user_uids.push(user.uid.clone());
                             user.token = None; // 清空过期用户的 Token
                             info!("Cleared token for user: {}", user.username);
                         }
                     }
                 }
             }
-        });
+        }
+
+        // Now, you can call self.stop_container without borrowing conflicts
+        for uid in expired_user_uids {
+            self.stop_container(&format!("{}.codeserver", uid));
+        }
     }
+
 
     /// Writes the current user database to a file in JSON format.
     pub fn write_to_file(&self) -> Result<(), Box<dyn Error>> {
@@ -333,9 +408,14 @@ impl UserDB {
     }
 
     /// Prints the details of all users for debugging purposes.
+    #[allow(dead_code)]
     pub fn print_users(&self) {
         for user in &self.users {
             info!("{:?}", user);
         }
+    }
+
+    pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
+        self.users.iter().find(|user| user.token.as_deref() == Some(token))
     }
 }

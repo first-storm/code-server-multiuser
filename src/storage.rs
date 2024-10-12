@@ -9,9 +9,9 @@ pub static USERDB: Lazy<String> = Lazy::new(|| {
     env::var("USERDB").expect("Environment variable 'USERDB' not set")
 });
 
-// pub static CONFIG: Lazy<String> = Lazy::new(|| {
-//     env::var("CONFIG").expect("Environment variable 'CONFIG' not set")
-// });
+pub static TRAEFIK_CONFIG: Lazy<String> = Lazy::new(|| {
+    env::var("TRAEFIK_CONFIG").expect("Environment variable 'TRAEFIK_CONFIG' not set")
+});
 
 pub static TEMPLATES: Lazy<String> = Lazy::new(|| {
     env::var("TEMPLATES").expect("Environment variable 'DATADIR' not set")
