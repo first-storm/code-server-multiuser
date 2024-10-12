@@ -2,6 +2,9 @@ mod user;
 mod storage;
 mod traefik;
 
+use std::fs::File;
+use std::io;
+use std::io::BufRead;
 use crate::user::UserDB;
 use actix_web::cookie::{CookieBuilder};
 use actix_web::{cookie, web, App, HttpResponse, HttpServer};
@@ -121,6 +124,31 @@ struct RegisterForm {
     uid: isize,
 }
 
+/// Check if the given UID is in the whitelist
+async fn is_uid_allowed(uid: isize) -> Result<bool, io::Error> {
+    let whitelist_path = storage::UID_WHITELIST.as_str();
+
+    // Open the file and check each line
+    if let Ok(file) = File::open(whitelist_path) {
+        let reader = io::BufReader::new(file);
+
+        // Iterate through each line in the file
+        for line in reader.lines() {
+            if let Ok(line_content) = line {
+                if let Ok(whitelist_uid) = line_content.trim().parse::<isize>() {
+                    // If UID matches, allow registration
+                    if whitelist_uid == uid {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+
+    // If no matching UID is found, registration is not allowed
+    Ok(false)
+}
+
 /// Handles the user registration logic, both GET (render page) and POST (process registration).
 async fn register(
     form: Option<web::Form<RegisterForm>>,
@@ -141,9 +169,22 @@ async fn register(
             uid,
         } = form.into_inner();
 
-        // Check if the passwords match
+        // Check if the UID is in the whitelist
+        if let Ok(is_allowed) = is_uid_allowed(uid).await {
+            if !is_allowed {
+                let msg = format!("UID {} 无法注册。", uid);
+                warn!("UID {} is not in the whitelist.", uid);
+                return register_page(tera, Some(msg), None).await;
+            }
+        } else {
+            let msg = "检查 UID 白名单时出错。".to_string();
+            error!("Error checking UID whitelist for UID: {}", uid);
+            return register_page(tera, Some(msg), None).await;
+        }
+
+        // Check if passwords match
         if password != password2 {
-            let msg = "Passwords do not match, please try again.".to_string();
+            let msg = "两次输入的密码不一致，请重试。".to_string();
             warn!("Password mismatch for user: {}", username);
             return register_page(tera, Some(msg), None).await;
         }
@@ -153,24 +194,26 @@ async fn register(
 
         // Check if the username already exists
         if db.username_exists(&username) {
-            let msg = format!("Username {} already exists, please choose another.", username);
+            let msg = format!("用户名 {} 已经存在，请选择其他用户名。", username);
             warn!("Username {} already exists.", username);
             return register_page(tera, Some(msg), None).await;
         }
 
+        // Check if the email already exists
         if db.email_exists(&email) {
-            let msg = format!("Email {} already exists, please choose another.", email);
+            let msg = format!("邮箱 {} 已经存在，请选择其他邮箱。", email);
             warn!("Email {} already exists.", email);
             return register_page(tera, Some(msg), None).await;
         }
 
+        // Check if the UID already exists
         if db.uid_exists(uid) {
-            let msg = format!("UID {} already exists, please choose another.", uid);
+            let msg = format!("UID {} 已经存在，请选择其他 UID。", uid);
             warn!("UID {} already exists.", uid);
             return register_page(tera, Some(msg), None).await;
         }
 
-        // Create new user
+        // Create a new user
         let new_user = user::User {
             uid,
             username: username.clone(),
@@ -179,25 +222,27 @@ async fn register(
             token: None,
         };
 
-        // Attempt to add user to the database
+        // Try to add the user to the database
         match db.add_user(new_user) {
             Ok(_) => {
-                let msg = "Registration successful! Please proceed to login.".to_string();
+                let msg = "注册成功！请继续登录。".to_string();
                 info!("User {} registered successfully.", username);
                 register_page(tera, None, Some(msg)).await
             }
             Err(e) => {
                 error!("Failed to add user {} to the database: {}", username, e);
-                let msg = "Registration failed, please contact the administrator.".to_string();
+                let msg = "注册失败，请联系管理员。".to_string();
                 register_page(tera, Some(msg), None).await
             }
         }
     } else {
         info!("Displaying registration page.");
-        // Render registration page for GET requests
+        // Render the registration page
         register_page(tera, None, None).await
     }
 }
+
+
 
 async fn logout(db: web::Data<SharedUserDB>, req: actix_web::HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     if let Some(token_cookie) = req.cookie("auth_token") {
@@ -336,7 +381,7 @@ async fn expiration_checker(db: SharedUserDB) {
 }
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> io::Result<()> {
     env_logger::init();
     info!("Starting server...");
 

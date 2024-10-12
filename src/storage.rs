@@ -16,3 +16,7 @@ pub static TRAEFIK_CONFIG: Lazy<String> = Lazy::new(|| {
 pub static TEMPLATES: Lazy<String> = Lazy::new(|| {
     env::var("TEMPLATES").expect("Environment variable 'DATADIR' not set")
 });
+
+pub static UID_WHITELIST: Lazy<String> = Lazy::new(|| {
+    env::var("UID_WHITELIST").expect("Environment variable 'UID_WHITELIST' not set")
+});
