@@ -1,7 +1,10 @@
 mod user;
 mod storage;
 mod traefik;
+mod container;
 
+use crate::container::ContainerManager;
+use crate::storage::DOMAIN;
 use crate::user::UserDB;
 use actix_web::cookie::CookieBuilder;
 use actix_web::rt::signal;
@@ -17,7 +20,6 @@ use std::time::Duration;
 use tera::{Context, Tera};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use crate::storage::DOMAIN;
 
 async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_web::Error> {
     let db_file_path = storage::USERDB.as_str();
@@ -55,12 +57,10 @@ async fn login_page(
         context.insert("message", &message);
     }
 
-    let rendered = tera
-        .render("login.html", &context)
-        .map_err(|e| {
-            error!("Template rendering error: {}", e);
-            actix_web::error::ErrorInternalServerError("Template error")
-        })?;
+    let rendered = tera.render("login.html", &context).map_err(|e| {
+        error!("Template rendering error: {}", e);
+        actix_web::error::ErrorInternalServerError("Template error")
+    })?;
 
     info!("Rendering login page.");
     Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
@@ -83,12 +83,10 @@ async fn register_page(
         context.insert("success_message", &message);
     }
 
-    let rendered = tera
-        .render("register.html", &context)
-        .map_err(|e| {
-            error!("Template rendering error: {}", e);
-            actix_web::error::ErrorInternalServerError("Template error")
-        })?;
+    let rendered = tera.render("register.html", &context).map_err(|e| {
+        error!("Template rendering error: {}", e);
+        actix_web::error::ErrorInternalServerError("Template error")
+    })?;
 
     info!("Rendering registration page.");
     Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
@@ -97,12 +95,10 @@ async fn register_page(
 /// Renders a custom 404 page when a route is not found.
 async fn page_404(tera: web::Data<Tera>) -> Result<HttpResponse, actix_web::Error> {
     let context = Context::new();
-    let rendered = tera
-        .render("404.html", &context)
-        .map_err(|e| {
-            error!("Template rendering error: {}", e);
-            actix_web::error::ErrorInternalServerError("Template error")
-        })?;
+    let rendered = tera.render("404.html", &context).map_err(|e| {
+        error!("Template rendering error: {}", e);
+        actix_web::error::ErrorInternalServerError("Template error")
+    })?;
 
     warn!("Page not found, returning 404.");
     Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
@@ -221,6 +217,7 @@ async fn register(
             email: email.clone(),
             password: password.clone(),
             token: None,
+            is_updating: false,
         };
 
         // Try to add the user to the database
@@ -244,7 +241,6 @@ async fn register(
 }
 
 
-
 async fn logout(db: web::Data<SharedUserDB>, req: actix_web::HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     if let Some(token_cookie) = req.cookie("auth_token") {
         let token = token_cookie.value().to_string();
@@ -261,13 +257,12 @@ async fn logout(db: web::Data<SharedUserDB>, req: actix_web::HttpRequest) -> Res
             let mut db = db.lock().await;
             db.logout(user.uid).expect("Failed to logout. Maybe it is because permission problem");
             Ok(HttpResponse::Found() // Use Found for 302 redirect
-                .append_header(("LOCATION", "/login"))
-                .finish())
+                .append_header(("LOCATION", "/login")).finish())
         } else {
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        }
+        };
     }
 
     // If no auth_token is found, redirect to the login page
@@ -281,7 +276,7 @@ async fn login(
     form: Option<web::Form<LoginForm>>,
     tera: web::Data<Tera>,
     db: web::Data<SharedUserDB>,
-    req: actix_web::HttpRequest, // Include request object to get cookies
+    req: actix_web::HttpRequest,
 ) -> Result<HttpResponse, actix_web::Error> {
     // Check if there is a valid auth_token
     if let Some(auth_cookie) = req.cookie("auth_token") {
@@ -292,9 +287,7 @@ async fn login(
         if let Some(user) = db.find_user_by_token(token) {
             // If user is found, redirect to dashboard
             info!("User {} already logged in, redirecting to dashboard.", user.username);
-            return Ok(HttpResponse::Found()
-                .append_header(("LOCATION", "/dashboard"))
-                .finish());
+            return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
         }
     }
 
@@ -303,21 +296,12 @@ async fn login(
         let LoginForm { username, password } = form.into_inner();
 
         let mut db = db.lock().await;
-        return if let Ok(token) = db.login(username.clone(), password) {
+        return if let Ok(token) = db.login(&username, &password) {
             info!("User {} logged in successfully.", username);
 
-            let cookie = CookieBuilder::new("auth_token", token)
-                .domain(DOMAIN.to_string())
-                .path("/")
-                .http_only(true)
-                .secure(true)
-                .max_age(cookie::time::Duration::days(30))
-                .finish();
+            let cookie = CookieBuilder::new("auth_token", token).domain(&*DOMAIN).path("/").http_only(true).secure(true).max_age(cookie::time::Duration::days(30)).finish();
 
-            Ok(HttpResponse::Found()
-                .append_header(("LOCATION", "/dashboard"))
-                .cookie(cookie)
-                .finish())
+            Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).cookie(cookie).finish())
         } else {
             warn!("Failed login attempt for user: {}", username);
             let msg = "Invalid username or password.".to_string();
@@ -328,8 +312,67 @@ async fn login(
     info!("Displaying login page.");
     login_page(tera, None).await
 }
+async fn update_container(
+    db: web::Data<SharedUserDB>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse, actix_web::Error> {
+    // Check if there is a valid auth_token
+    if let Some(auth_cookie) = req.cookie("auth_token") {
+        let token = auth_cookie.value().to_string();
 
+        // Lock the database and find the user
+        let uid;
+        {
+            let mut db_guard = db.lock().await;
+            if let Some(user) = db_guard.find_user_by_token(token.as_str()) {
+                uid = user.uid.clone();
+                info!("User {} already logged in, updating.", user.username);
 
+                // Check if the container is the latest version
+                match ContainerManager::is_container_latest_version(format!("{}.codeserver", user.uid).as_str()) {
+                    Ok(true) => {
+                        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+                    }
+                    Ok(false) => {
+                        // Mark the user as updating
+                        if let Some(user_mut) = db_guard.find_user_by_token_mut(token.as_str()) {
+                            user_mut.is_updating = true;
+                        }
+                    }
+                    Err(..) => {
+                        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+                    }
+                }
+            } else {
+                // If the user is not found, redirect to the dashboard
+                info!("Redirect to dashboard.");
+                return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+            }
+        } // The scope of db_guard ends here, releasing the lock on db
+
+        // Update the container in an asynchronous task
+        let db_clone = db.clone();
+        actix_web::rt::spawn(async move {
+            match ContainerManager::update_container(&uid.to_string()) {
+                Ok(_) => {
+                    let mut db_guard = db_clone.lock().await;
+                    if let Some(user_mut) = db_guard.find_user_by_uid_mut(uid) {
+                        user_mut.is_updating = false;
+                    }
+                    info!("Container for user {} updated successfully.", uid);
+                }
+                Err(e) => {
+                    error!("Failed to update container for user {}: {}", uid, e);
+                }
+            }
+        });
+
+        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+    }
+
+    info!("Redirect to dashboard.");
+    Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish())
+}
 
 /// Renders the dashboard page for logged-in users.
 async fn dashboard(
@@ -350,22 +393,28 @@ async fn dashboard(
             let mut context = Context::new();
             context.insert("username", &user.username);  // Insert username into the context
             context.insert("email", &user.email);        // Insert email into the context
-            match UserDB::is_container_running(format!("{}", user.uid).as_str()) {
+            match ContainerManager::is_container_running(format!("{}", user.uid).as_str()) {
                 Ok(true) => context.insert("container_stat", "on"),
                 Ok(false) => context.insert("container_stat", "off"),
                 Err(e) => {
                     context.insert("warning", format!("容器状态异常。请联系管理员。\n错误信息：{}", e).as_str());
                     context.insert("container_stat", "off");
-                },
+                }
             };
 
+            match ContainerManager::is_container_latest_version(format!("{}.codeserver", user.uid).as_str()) {
+                Ok(true) => (),
+                Ok(false) => context.insert("update-available", ContainerManager::get_latest_image_tag().unwrap_or_else(|e| format!("版本号获取失败，错误信息：{}", e)).as_str()),
+                Err(e) => {
+                    context.insert("update-available", format!("版本号获取失败，错误信息：{}", e).as_str());
+                }
+            }
+
             // Render the dashboard.html template
-            let rendered = tera
-                .render("dashboard.html", &context)
-                .map_err(|e| {
-                    error!("Template rendering error: {}", e);
-                    actix_web::error::ErrorInternalServerError("Template rendering error")
-                })?;
+            let rendered = tera.render("dashboard.html", &context).map_err(|e| {
+                error!("Template rendering error: {}", e);
+                actix_web::error::ErrorInternalServerError("Template rendering error")
+            })?;
 
             info!("Rendered dashboard page, user: {}", user.username);
             Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
@@ -373,15 +422,13 @@ async fn dashboard(
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        }
+        };
     }
 
     // If no auth_token is found, redirect to the login page
     warn!("auth_token not found, redirecting to login page.");
     Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
 }
-
-
 
 
 /// Periodically checks and stops expired containers for users.
@@ -402,11 +449,10 @@ async fn main() -> io::Result<()> {
     env_logger::init();
     info!("Starting server...");
 
-    let tera = Tera::new(format!("{}/**/*", storage::TEMPLATES.as_str()).as_str())
-        .unwrap_or_else(|e| {
-            error!("Error initializing Tera templates: {}", e);
-            exit(1);
-        });
+    let tera = Tera::new(format!("{}/**/*", storage::TEMPLATES.as_str()).as_str()).unwrap_or_else(|e| {
+        error!("Error initializing Tera templates: {}", e);
+        exit(1);
+    });
 
     // Initialize shared database
     let shared_database = if !std::path::Path::new(storage::USERDB.as_str()).exists() {
@@ -441,8 +487,7 @@ async fn main() -> io::Result<()> {
 
     // Start the HTTP server and share the database
     let srv = HttpServer::new(move || {
-        App::new()
-            .app_data(web::Data::new(tera.clone())) // Add Tera template engine to app state
+        App::new().app_data(web::Data::new(tera.clone())) // Add Tera template engine to app state
             .app_data(web::Data::new(shared_database.clone())) // Share the database
             .route("/login", web::get().to(login)) // Handle GET requests for login page
             .route("/login", web::post().to(login)) // Handle POST requests for login form
@@ -451,11 +496,9 @@ async fn main() -> io::Result<()> {
             .route("/dashboard", web::get().to(dashboard))
             .route("/logout", web::get().to(logout))
             .route("/reloaddb", web::get().to(reload_db))
+            .route("/upgrade",web::get().to(update_container))
             .default_service(web::route().to(page_404)) // Default handler for 404 pages
-    })
-        .bind("127.0.0.1:8080")?
-        .run()
-        .await;
+    }).bind("127.0.0.1:8080")?.run().await;
 
     srv
 }
@@ -481,7 +524,6 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
         Ok(()) => info!("Traefik instances have been successfully shut down."),
         Err(e) => error!("Error shutting down Traefik instances: {}", e),
     }
-
 
     info!("Shutdown complete.");
 }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+#[allow(non_snake_case)]
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct Router {
     pub(crate) rule: String,
@@ -12,12 +14,14 @@ pub struct LoadBalancerServer {
     pub(crate) url: String,
 }
 
+#[allow(non_snake_case)]
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct LoadBalancer {
     pub(crate) servers: Vec<LoadBalancerServer>,
     pub(crate) passHostHeader: bool,
 }
 
+#[allow(non_snake_case)]
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct Service {
     pub(crate) loadBalancer: LoadBalancer,
