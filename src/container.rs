@@ -208,24 +208,30 @@ impl ContainerManager {
         command.arg("create")
             .arg("--name")
             .arg(format!("{}.codeserver", uid))
+            // .arg("-v")
+            // .arg(format!(
+            //     "{}/{}.data/.local:/home/coder/.local",
+            //     DATADIR.as_str(),
+            //     uid
+            // ))
+            // .arg("-v")
+            // .arg(format!(
+            //     "{}/{}.data/.config:/home/coder/.config",
+            //     DATADIR.as_str(),
+            //     uid
+            // ))
+            // .arg("-v")
+            // .arg(format!(
+            //     "{}/{}.data/project:{}",
+            //     DATADIR.as_str(),
+            //     uid,
+            //     "/home/coder/projects"
+            // ))
+            // 
             .arg("-v")
             .arg(format!(
-                "{}/{}.data/.local:/home/coder/.local",
-                DATADIR.as_str(),
+                "/mnt/code-data/{}.data/home:/home/coder",
                 uid
-            ))
-            .arg("-v")
-            .arg(format!(
-                "{}/{}.data/.config:/home/coder/.config",
-                DATADIR.as_str(),
-                uid
-            ))
-            .arg("-v")
-            .arg(format!(
-                "{}/{}.data/project:{}",
-                DATADIR.as_str(),
-                uid,
-                "/home/coder/projects"
             ))
             .arg("-u")
             .arg(format!("{}:{}", uid_str, gid_str))
@@ -243,7 +249,9 @@ impl ContainerManager {
             .arg("--auth")
             .arg("none")
             .arg("--bind-addr")
-            .arg("0.0.0.0:8080");
+            .arg("0.0.0.0:8080")
+            .arg("--user-data-dir")
+            .arg("/home/coder/.local/share/code-server");
         Ok(command)
     }
 
