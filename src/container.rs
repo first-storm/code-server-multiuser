@@ -229,7 +229,7 @@ impl ContainerManager {
         )).arg("-u").arg(format!("{}:{}", uid_str, gid_str)).arg("-e").arg(format!("DOCKER_USER={}", user))
             // .arg("-e")
             // .arg(format!("PASSWORD={}", password))
-            .arg("-e").arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#).arg("--storage-opt").arg("size=1G").arg("--network").arg("traefik-network").arg(image_with_tag).arg("--auth").arg("none");
+            .arg("-e").arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#).arg("--storage-opt").arg("size=1G").arg("--network").arg("traefik-network").arg(image_with_tag).arg("--auth").arg("none").arg("--bind-addr").arg("0.0.0.0:8080");
 
         Ok(command)
     }
