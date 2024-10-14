@@ -157,7 +157,7 @@ fi"#.to_string();
     ) {
         for user in users.iter_mut() {
             let heartbeat_path = format!(
-                "{}/{}.data/.local/share/code-server/heartbeat",
+                "{}/{}.data/home/.local/share/code-server/heartbeat",
                 *DATADIR, user.uid
             );
 
