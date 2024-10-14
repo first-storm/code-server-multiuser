@@ -191,13 +191,6 @@ impl ContainerManager {
 
     /// Private function to build Docker create command
     fn build_docker_create_command(uid: &str) -> io::Result<Command> {
-        // Prepare environment variables and paths
-        let home = dirs::home_dir().ok_or_else(|| io::Error::new(ErrorKind::Other, "Cannot determine home directory"))?;
-        let home_str = home.to_str().ok_or_else(|| io::Error::new(ErrorKind::Other, "Invalid home directory"))?;
-
-        let pwd = env::current_dir()?;
-        let pwd_str = pwd.to_str().ok_or_else(|| io::Error::new(ErrorKind::Other, "Invalid current directory"))?;
-
         let user = env::var("USER").map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Get the numeric UID and GID without spawning a process
@@ -217,24 +210,22 @@ impl ContainerManager {
             .arg(format!("{}.codeserver", uid))
             .arg("-v")
             .arg(format!(
-                "{}/{}.data/.local:{}/.local",
+                "{}/{}.data/.local:/home/coder/.local",
                 DATADIR.as_str(),
-                uid,
-                home_str
+                uid
             ))
             .arg("-v")
             .arg(format!(
-                "{}/{}.data/.config:{}/.config",
+                "{}/{}.data/.config:/home/coder/.config",
                 DATADIR.as_str(),
-                uid,
-                home_str
+                uid
             ))
             .arg("-v")
             .arg(format!(
                 "{}/{}.data/project:{}",
                 DATADIR.as_str(),
                 uid,
-                pwd_str
+                "/home/coder/projects"
             ))
             .arg("-v")
             .arg(format!(
