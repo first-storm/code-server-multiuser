@@ -4,6 +4,7 @@ mod traefik;
 mod container;
 
 use crate::container::ContainerManager;
+use tokio::signal::unix::{signal, SignalKind};
 use crate::storage::DOMAIN;
 use crate::user::UserDB;
 use actix_web::cookie::CookieBuilder;
@@ -475,7 +476,26 @@ async fn main() -> io::Result<()> {
     // Handle the server shutdown signal
     let shared_db_clone = shared_database.clone(); // Clone shared database for shutdown handler
     tokio::spawn(async move {
-        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        // For Unix platforms, set up signal handlers for SIGINT and SIGTERM
+        #[cfg(unix)]
+        {
+            let mut sigint = signal(SignalKind::interrupt()).expect("Failed to listen to SIGINT");
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to listen to SIGTERM");
+
+            tokio::select! {
+                _ = sigint.recv() => {
+                    info!("Received SIGINT signal.");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM signal.");
+                }
+            }
+        }
+        // For non-Unix platforms, use ctrl_c()
+        #[cfg(not(unix))]
+        {
+            signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        }
 
         // Perform the shutdown procedure (save the database, etc.)
         shutdown_procedure(shared_db_clone).await;
