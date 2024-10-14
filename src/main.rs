@@ -3,14 +3,8 @@ mod storage;
 mod traefik;
 mod container;
 
-use std::{
-    fs::File,
-    io::{self, BufRead},
-    process::exit,
-    sync::Arc,
-    time::Duration,
-};
-
+use std::{fs, fs::File, io::{self, BufRead}, process::exit, sync::Arc, time::Duration};
+use std::path::Path;
 use actix_web::{
     cookie::{self, CookieBuilder},
     web, App, HttpResponse, HttpServer, Result as ActixResult,
@@ -536,7 +530,7 @@ async fn main() -> io::Result<()> {
     });
 
     // Initialize shared database
-    let shared_database = if !std::path::Path::new(storage::USERDB.as_str()).exists() {
+    let shared_database = if !Path::new(storage::USERDB.as_str()).exists() {
         info!("Database not found: {}. Creating new database...", storage::USERDB.as_str());
         Arc::new(Mutex::new(UserDB::new(storage::USERDB.as_str())))
     } else {
@@ -619,6 +613,17 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
     match &db.traefik_instances.shutdown() {
         Ok(()) => info!("Traefik instances have been successfully shut down."),
         Err(e) => error!("Error shutting down Traefik instances: {}", e),
+    }
+
+    // delete /tmp/docker_image_latest_tag.cache
+    let cache_file = "/tmp/docker_image_latest_tag.cache";
+    if Path::new(cache_file).exists() {
+        match fs::remove_file(cache_file) {
+            Ok(_) => info!("Successfully deleted cache file: {}", cache_file),
+            Err(e) => error!("Failed to delete cache file {}: {}", cache_file, e),
+        }
+    } else {
+        info!("Cache file does not exist: {}", cache_file);
     }
 
     info!("Shutdown complete.");
