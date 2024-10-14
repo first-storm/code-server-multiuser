@@ -5,38 +5,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>服务初始化</title>
   <!-- Bootstrap CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+  <!-- 引入Bootstrap Icons -->
+  <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.10.5/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     body {
-      background-color: #f8f9fa;
+      background-color: #f2f2f2;
     }
-    .init-message {
-      max-width: 400px;
-      margin: 0 auto;
-      padding: 20px;
-      background-color: #ffffff;
-      border-radius: 5px;
-      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-      text-align: center;
+    .main-content {
+      margin-top: 80px;
+    }
+    .card {
+      border: none;
+      border-radius: 10px;
+    }
+    .card-header {
+      border-bottom: none;
+      background-color: #007bff;
+      color: #fff;
+      border-top-left-radius: 10px;
+      border-top-right-radius: 10px;
     }
   </style>
 </head>
 <body>
-<div class="container mt-5">
-  <div class="row">
-    <div class="col-md-6 offset-md-3">
-      <div class="init-message">
-        <h2 class="mb-4">服务正在初始化</h2>
-        <p>请稍后再试。如果等的太久，就登出再登录试试。</p>
-        <div class="d-grid">
-          <a href="/dashboard" class="btn btn-primary">确定</a>
+
+<!-- 导航栏 -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary fixed-top">
+  <div class="container">
+    <a class="navbar-brand" href="/">DevSphere</a>
+  </div>
+</nav>
+
+<div class="container main-content">
+  <div class="row justify-content-center">
+    <div class="col-md-8">
+      <!-- 服务初始化信息卡片 -->
+      <div class="card shadow-sm">
+        <div class="card-header">
+          <h4 class="mb-0">服务正在初始化</h4>
+        </div>
+        <div class="card-body text-center">
+          <p>请稍后再试。如果等待时间过长，请联系管理员。</p>
+          <a href="/dashboard" class="btn btn-primary mt-3"><i class="bi bi-arrow-left-circle me-1"></i>返回仪表板</a>
         </div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- Bootstrap JS (optional) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+<!-- Bootstrap JS（可选） -->
+<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

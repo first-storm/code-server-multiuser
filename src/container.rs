@@ -368,12 +368,7 @@ impl ContainerManager {
         struct TokenResponse {
             token: String,
         }
-        let token_resp: TokenResponse = client
-            .get(&token_url)
-            .send()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
-            .json()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+        let token_resp: TokenResponse = client.get(&token_url).send().map_err(|e| io::Error::new(ErrorKind::Other, e))?.json().map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Get list of tags
         let tags_url = format!("https://ghcr.io/v2/{}/{}/tags/list", user, image);
@@ -383,13 +378,7 @@ impl ContainerManager {
             name: String,
             tags: Vec<String>,
         }
-        let tags_resp: TagsResponse = client
-            .get(&tags_url)
-            .header("Authorization", format!("Bearer {}", token_resp.token))
-            .send()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
-            .json()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+        let tags_resp: TagsResponse = client.get(&tags_url).header("Authorization", format!("Bearer {}", token_resp.token)).send().map_err(|e| io::Error::new(ErrorKind::Other, e))?.json().map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Iterate over tags and extract versions
         fn extract_version(tag: &str) -> Option<Version> {

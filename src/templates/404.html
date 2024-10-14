@@ -5,10 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>404 - 页面未找到</title>
   <!-- Bootstrap CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+  <!-- 引入Bootstrap Icons -->
+  <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.10.5/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     body {
-      background-color: #f8f9fa;
+      background-color: #f2f2f2;
+    }
+    .main-content {
+      margin-top: 80px;
     }
     .error-container {
       max-width: 600px;
@@ -27,23 +32,34 @@
   </style>
 </head>
 <body>
-<div class="container mt-5">
+<!-- 导航栏 -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary fixed-top">
+  <div class="container">
+    <a class="navbar-brand" href="/">DevSphere</a>
+    <div class="d-flex ms-auto align-items-center">
+      <!-- 如果需要显示用户名，可以在这里添加 -->
+      <!-- <span class="navbar-text me-3">欢迎，{{ username }}</span> -->
+    </div>
+  </div>
+</nav>
+
+<div class="container main-content">
   <div class="row">
     <div class="col-md-8 offset-md-2">
       <div class="error-container">
-        <img src="https://rs.wzznft.com/i/2024/10/11/zpgj84.svg" alt="404 Error" class="error-image">
+        <img src="https://raw.gitmirror.com/first-storm/pic/refs/heads/main/404.svg" alt="404 Error" class="error-image">
         <h1 class="display-4 mb-4">哎呀！页面走丢了</h1>
         <p class="lead mb-4">很抱歉，我们找不到您要访问的页面。它可能已被移动、删除或从未存在过。</p>
         <div class="d-grid gap-2 col-6 mx-auto">
-          <a href="/" class="btn btn-primary btn-lg">返回首页</a>
-          <button onclick="history.back()" class="btn btn-outline-secondary btn-lg">返回上一页</button>
+          <a href="/" class="btn btn-primary btn-lg"><i class="bi bi-house-door-fill me-1"></i>返回首页</a>
+          <button onclick="history.back()" class="btn btn-outline-secondary btn-lg"><i class="bi bi-arrow-left-circle me-1"></i>返回上一页</button>
         </div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- Bootstrap JS (optional) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+<!-- Bootstrap JS（可选） -->
+<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

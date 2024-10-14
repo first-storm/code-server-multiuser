@@ -5,107 +5,124 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>用户信息</title>
     <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body {
-            background-color: #f8f9fa;
+            background-color: #f2f2f2;
         }
-        .user-info {
-            max-width: 400px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #ffffff;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        .main-content {
+            margin-top: 80px;
         }
-        .update-available {
-            margin-bottom: 20px;
+        .card {
+            border: none;
+            border-radius: 10px;
+        }
+        .card-header {
+            border-bottom: none;
+            background-color: #007bff;
+            color: #fff;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
         }
     </style>
 </head>
 <body>
-<div class="container mt-5">
-    <div class="row">
-        <div class="col-md-6 offset-md-3">
-            <div class="user-info">
-                {% if is_updating %}
-                <h2 class="text-center mb-4">正在维护/更新IDE</h2>
-                {% else %}
-                <h2 class="text-center mb-4">用户信息</h2>
 
-                <!-- 更新通知 (蓝色)，当有可用更新时显示 -->
-                {% if update_available %}
-                <div class="alert alert-info update-available" role="alert">
+<!-- 导航栏 -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary fixed-top">
+    <div class="container">
+        <a class="navbar-brand" href="/">DevSphere</a>
+        <div class="d-flex ms-auto align-items-center">
+            <span class="navbar-text me-3">欢迎，{{ username }}</span>
+            <form action="/logout" method="get" class="mb-0">
+                <button type="submit" class="btn btn-outline-light btn-sm">登出</button>
+            </form>
+        </div>
+    </div>
+</nav>
+
+<div class="container main-content">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            {% if is_updating %}
+            <!-- 维护提示 -->
+            <div class="alert alert-warning text-center" role="alert">
+                <strong>正在维护/更新IDE</strong>
+            </div>
+            {% else %}
+            <!-- 更新提示 -->
+            {% if update_available %}
+            <div class="alert alert-info d-flex align-items-center" role="alert">
+                <div>
+                    <i class="bi bi-info-circle-fill me-2"></i>
                     更新可用：版本 {{ update_available }}
                 </div>
-                <div class="d-grid mb-3">
-                    <a href="/upgrade" class="btn btn-info">更新到 {{ update_available }}</a>
-                </div>
-                {% endif %}
+                <a href="/upgrade" class="btn btn-sm btn-info ms-auto">更新到 {{ update_available }}</a>
+            </div>
+            {% endif %}
 
-                <!-- 警告框（红色），仅当传递了警告消息时显示 -->
-                {% if warning %}
-                <div class="alert alert-danger" role="alert">
-                    {{ warning }}
-                </div>
-                {% endif %}
+            <!-- 警告信息 -->
+            {% if warning %}
+            <div class="alert alert-danger" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                {{ warning }}
+            </div>
+            {% endif %}
 
-                <!-- 通知框（绿色），仅当传递了通知消息时显示 -->
-                {% if notification %}
-                <div class="alert alert-success" role="alert">
-                    {{ notification }}
-                </div>
-                {% endif %}
+            <!-- 通知信息 -->
+            {% if notification %}
+            <div class="alert alert-success" role="alert">
+                <i class="bi bi-check-circle-fill me-2"></i>
+                {{ notification }}
+            </div>
+            {% endif %}
 
-                <div class="mb-3">
-                    <label class="form-label">用户名：</label>
-                    <p class="form-control">{{ username }}</p>
+            <!-- 用户信息卡片 -->
+            <div class="card shadow-sm">
+                <div class="card-header">
+                    <h4 class="mb-0">用户信息</h4>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label">邮箱：</label>
-                    <p class="form-control">{{ email }}</p>
-                </div>
-
-                <!-- 服务器状态 -->
-                <div class="mb-3">
-                    <label class="form-label">服务器状态：</label>
-                    <p class="form-control">
+                <div class="card-body">
+                    <p><strong>用户名：</strong>{{ username }}</p>
+                    <p><strong>邮箱：</strong>{{ email }}</p>
+                    <p>
+                        <strong>服务器状态：</strong>
                         {% if container_stat == "on" %}
-                        服务器正在运行
+                        <span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>服务器正在运行</span>
                         {% else %}
-                        服务器未运行
+                        <span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>服务器未运行</span>
                         {% endif %}
                     </p>
-                </div>
 
-                <!-- 根据服务器状态显示不同的按钮 -->
-                {% if container_stat == "on" %}
-                <div class="d-grid">
-                    <a href="/ide" class="btn btn-primary">进入IDE</a>
+                    <!-- 根据服务器状态显示按钮 -->
+                    {% if container_stat == "on" %}
+                    <a href="/ide" class="btn btn-success mt-3"><i class="bi bi-arrow-right-circle me-1"></i>进入IDE</a>
+                    {% else %}
+                    <button class="btn btn-secondary mt-3" disabled><i class="bi bi-cloud-slash-fill me-1"></i>服务未运行</button>
+                    <!-- 提示信息 -->
+                    <div class="alert alert-danger mt-3" role="alert">
+                        <i class="bi bi-exclamation-circle-fill me-2"></i>请尝试重新登录，或联系管理员。
+                    </div>
+                    {% endif %}
                 </div>
-                {% else %}
-                <div class="d-grid">
-                    <button class="btn btn-secondary" disabled>服务未运行</button>
-                </div>
-                <!-- 红色提示 -->
-                <div class="alert alert-danger mt-3" role="alert">
-                    请尝试重新登录，或联系管理员。
-                </div>
-                {% endif %}
-
-                <!-- 登出按钮 -->
-                <div class="d-grid mt-3">
-                    <form action="/logout" method="get">
-                        <button type="submit" class="btn btn-danger">登出</button>
-                    </form>
-                </div>
-                {% endif %}
             </div>
+
+            <!-- 登出按钮（可选，如已在导航栏添加，可移除此处） -->
+            <!--
+            <div class="d-grid mt-4">
+                <form action="/logout" method="get">
+                    <button type="submit" class="btn btn-outline-danger"><i class="bi bi-box-arrow-right me-1"></i>登出</button>
+                </form>
+            </div>
+            -->
+            {% endif %}
         </div>
     </div>
 </div>
 
 <!-- Bootstrap JS（可选） -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<!-- 引入Bootstrap Icons -->
+<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.10.5/font/bootstrap-icons.min.css" rel="stylesheet">
 </body>
 </html>

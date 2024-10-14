@@ -3,24 +3,33 @@ mod storage;
 mod traefik;
 mod container;
 
-use crate::container::ContainerManager;
-use tokio::signal::unix::{signal, SignalKind};
-use crate::storage::DOMAIN;
-use crate::user::UserDB;
-use actix_web::cookie::CookieBuilder;
-use actix_web::rt::signal;
-use actix_web::{cookie, web, App, HttpResponse, HttpServer};
+use std::{
+    fs::File,
+    io::{self, BufRead},
+    process::exit,
+    sync::Arc,
+    time::Duration,
+};
+
+use actix_web::{
+    cookie::{self, CookieBuilder},
+    web, App, HttpResponse, HttpServer, Result as ActixResult,
+};
+
+use crate::{
+    container::ContainerManager,
+    user::UserDB,
+};
+
 use log::{error, info, warn};
 use serde::Deserialize;
-use std::fs::File;
-use std::io;
-use std::io::BufRead;
-use std::process::exit;
-use std::sync::Arc;
-use std::time::Duration;
 use tera::{Context, Tera};
-use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::Mutex,
+    time::sleep,
+};
+
 
 async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_web::Error> {
     let db_file_path = storage::USERDB.as_str();
@@ -300,7 +309,7 @@ async fn login(
         return if let Ok(token) = db.login(&username, &password) {
             info!("User {} logged in successfully.", username);
 
-            let cookie = CookieBuilder::new("auth_token", token).domain(&*DOMAIN).path("/").http_only(true).secure(true).max_age(cookie::time::Duration::days(30)).finish();
+            let cookie = CookieBuilder::new("auth_token", token).domain(&*storage::DOMAIN).path("/").http_only(true).secure(true).max_age(cookie::time::Duration::days(30)).finish();
 
             Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).cookie(cookie).finish())
         } else {
@@ -431,6 +440,33 @@ async fn dashboard(
     Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
 }
 
+async fn index_page(
+    tera: web::Data<Tera>,
+    req: actix_web::HttpRequest,
+    db: web::Data<SharedUserDB>,
+) -> ActixResult<HttpResponse> {
+    let mut context = Context::new();
+
+    // Check if the user is logged in
+    let mut logged_in = false;
+    if let Some(auth_cookie) = req.cookie("auth_token") {
+        let token = auth_cookie.value();
+        let db = db.lock().await;
+        if let Some(_user) = db.find_user_by_token(token) {
+            logged_in = true;
+        }
+    }
+    context.insert("logged_in", &logged_in);
+
+    // Render the index.html template
+    let rendered = tera.render("index.html", &context).map_err(|e| {
+        error!("Template rendering error: {}", e);
+        actix_web::error::ErrorInternalServerError("Template rendering error")
+    })?;
+
+    info!("Rendered homepage index.html");
+    Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
+}
 
 /// Periodically checks and stops expired containers for users.
 async fn expiration_checker(db: SharedUserDB) {
@@ -513,11 +549,7 @@ async fn main() -> io::Result<()> {
             .route("/login", web::post().to(login)) // Handle POST requests for login form
             .route("/register", web::get().to(register)) // Handle GET requests for registration page
             .route("/register", web::post().to(register)) // Handle POST requests for registration form
-            .route("/dashboard", web::get().to(dashboard))
-            .route("/logout", web::get().to(logout))
-            .route("/reloaddb", web::get().to(reload_db))
-            .route("/upgrade",web::get().to(update_container))
-            .default_service(web::route().to(page_404)) // Default handler for 404 pages
+            .route("/dashboard", web::get().to(dashboard)).route("/logout", web::get().to(logout)).route("/", web::get().to(index_page)).route("/reloaddb", web::get().to(reload_db)).route("/upgrade", web::get().to(update_container)).default_service(web::route().to(page_404)) // Default handler for 404 pages
     }).bind("127.0.0.1:8080")?.run().await;
 
     srv
