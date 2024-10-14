@@ -29,17 +29,17 @@ impl ContainerManager {
     /// Update an existing Docker container
     pub fn update_container(uid: &str, token: &str, traefik_instances: &mut traefik::Instances) -> io::Result<()> {
         let container_id = format!("{}.codeserver", uid);
-
+        
         if Self::is_container_running(uid)? {
             Self::stop_container(&container_id, traefik_instances)?;
         }
-
+        
         Self::remove_container(&container_id)?;
-
+        
         Self::pull_latest_image()?;
-
+        
         Self::run_docker_create_command(uid)?;
-
+        
         Self::start_container(&container_id, token, traefik_instances)?;
 
         Ok(())
@@ -47,6 +47,7 @@ impl ContainerManager {
 
 
 
+    /// Start Docker container
     /// Start Docker container
     pub fn start_container(
         container_id: &str,
@@ -58,26 +59,29 @@ impl ContainerManager {
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
 
-            // Execute the command inside the container
+            // Execute command inside the container
+            let exec_command = r#"if [ ! -e /home/coder/.local/share/code-server/extensions ]; then \
+mkdir -p /home/coder/.local/share/code-server/ && \
+ln -s /home/defaultconfig/.local/share/code-server/extensions /home/coder/.local/share/code-server/extensions; \
+fi"#.to_string();
+
             let exec_output = Command::new("docker")
                 .arg("exec")
                 .arg(container_id)
-                .arg("ln")
-                .arg("-s")
-                .arg("/home/defaultconfig/.local/share/code-server/extensions")
-                .arg("/home/coder/.local/share/code-server/extensions")
+                .arg("sh")
+                .arg("-c")
+                .arg(&exec_command)
                 .output()?;
 
             if exec_output.status.success() {
-                info!("Successfully executed command in container: {}", container_id);
+                info!("Executed command inside container: {}", container_id);
             } else {
-                let error_message = format!(
-                    "Failed to execute command in container: {}. Error: {}",
-                    container_id,
-                    String::from_utf8_lossy(&exec_output.stderr)
-                );
-                error!("{}", error_message);
-                return Err(io::Error::new(ErrorKind::Other, error_message));
+                let exec_error = String::from_utf8_lossy(&exec_output.stderr);
+                error!(
+                "Failed to execute command inside container: {}. Error: {}",
+                container_id, exec_error
+            );
+                return Err(io::Error::new(ErrorKind::Other, exec_error.to_string()));
             }
 
             if let Err(e) = traefik_instances.add(Instance {
@@ -250,7 +254,7 @@ impl ContainerManager {
             //     uid,
             //     "/home/coder/projects"
             // ))
-            //
+            // 
             .arg("-v")
             .arg(format!(
                 "/mnt/code-data/{}.data/home:/home/coder",
