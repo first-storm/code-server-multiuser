@@ -226,7 +226,7 @@ impl UserDB {
     pub fn write_to_file(&self) -> Result<(), Box<dyn Error>> {
         let file = OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer(writer, &self)?;
+        serde_json::to_writer_pretty(writer, &self)?;
         info!("User database written to file: {}", self.file_path);
         Ok(())
     }
