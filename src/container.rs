@@ -191,13 +191,6 @@ impl ContainerManager {
 
     /// Private function to build Docker create command
     fn build_docker_create_command(uid: &str) -> io::Result<Command> {
-        // Prepare environment variables and paths
-        let home = dirs::home_dir().ok_or_else(|| io::Error::new(ErrorKind::Other, "Cannot determine home directory"))?;
-        let home_str = home.to_str().ok_or_else(|| io::Error::new(ErrorKind::Other, "Invalid home directory"))?;
-
-        let pwd = env::current_dir()?;
-        let pwd_str = pwd.to_str().ok_or_else(|| io::Error::new(ErrorKind::Other, "Invalid current directory"))?;
-
         let user = env::var("USER").map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Get the numeric UID and GID without spawning a process
@@ -212,26 +205,31 @@ impl ContainerManager {
 
         // Build Docker create command
         let mut command = Command::new("docker");
-        command.arg("create").arg("--name").arg(format!("{}.codeserver", uid)).arg("-v").arg(format!(
-            "{}/{}.data/.local:{}/.local",
-            DATADIR.as_str(),
-            uid,
-            home_str
-        )).arg("-v").arg(format!(
-            "{}/{}.data/.config:{}/.config",
-            DATADIR.as_str(),
-            uid,
-            home_str
-        )).arg("-v").arg(format!(
-            "{}/{}.data/project:{}",
-            DATADIR.as_str(),
-            uid,
-            pwd_str
-        )).arg("-u").arg(format!("{}:{}", uid_str, gid_str)).arg("-e").arg(format!("DOCKER_USER={}", user))
+        command.arg("create")
+            .arg("--name")
+            .arg(format!("{}.codeserver", uid))
+            .arg("-v")
+            .arg(format!(
+                "/mnt/code-data/{}.data/home:/home/coder",
+                uid
+            ))
+            .arg("-u")
+            .arg(format!("{}:{}", uid_str, gid_str))
+            .arg("-e")
+            .arg(format!("DOCKER_USER={}", user))
             // .arg("-e")
             // .arg(format!("PASSWORD={}", password))
-            .arg("-e").arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#).arg("--storage-opt").arg("size=1G").arg("--network").arg("traefik-network").arg(image_with_tag).arg("--auth").arg("none").arg("--bind-addr").arg("0.0.0.0:8080");
-
+            .arg("-e")
+            .arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#)
+            .arg("--storage-opt")
+            .arg("size=1G")
+            .arg("--network")
+            .arg("traefik-network")
+            .arg(image_with_tag)
+            .arg("--auth")
+            .arg("none")
+            .arg("--bind-addr")
+            .arg("0.0.0.0:8080");
         Ok(command)
     }
 
