@@ -227,11 +227,6 @@ impl ContainerManager {
                 uid,
                 "/home/coder/projects"
             ))
-            .arg("-v")
-            .arg(format!(
-                "/mnt/code-data/{}.data/home:/home/coder",
-                uid
-            ))
             .arg("-u")
             .arg(format!("{}:{}", uid_str, gid_str))
             .arg("-e")
