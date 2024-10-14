@@ -403,21 +403,57 @@ async fn dashboard(
             let mut context = Context::new();
             context.insert("username", &user.username);  // Insert username into the context
             context.insert("email", &user.email);        // Insert email into the context
-            match ContainerManager::is_container_running(format!("{}", user.uid).as_str()) {
+
+            // Check if the container is running and update the context accordingly
+            match ContainerManager::is_container_running(&user.uid.to_string()) {
                 Ok(true) => context.insert("container_stat", "on"),
                 Ok(false) => context.insert("container_stat", "off"),
                 Err(e) => {
-                    context.insert("warning", format!("容器状态异常。请联系管理员。\n错误信息：{}", e).as_str());
+                    context.insert("warning", format!("Container status error. Please contact the administrator.\nError: {}", e).as_str());
                     context.insert("container_stat", "off");
                 }
             };
 
-            match ContainerManager::is_container_latest_version(format!("{}.codeserver", user.uid).as_str()) {
-                Ok(true) => (),
-                Ok(false) => context.insert("update-available", ContainerManager::get_latest_image_tag().unwrap_or_else(|e| format!("版本号获取失败，错误信息：{}", e)).as_str()),
-                Err(e) => {
-                    context.insert("update-available", format!("版本号获取失败，错误信息：{}", e).as_str());
+            // Get the latest image tag
+            let latest_tag_result = ContainerManager::get_latest_image_tag();
+
+            // Get the current container's image tag
+            let container_name = format!("{}.codeserver", user.uid);
+            let current_tag_result = ContainerManager::get_container_tag(&container_name);
+
+            // Variables to hold the tags if they are successfully retrieved
+            let mut latest_tag_opt = None;
+            let mut current_tag_opt = None;
+
+            // Handle the latest tag result
+            match latest_tag_result {
+                Ok(tag) => {
+                    latest_tag_opt = Some(tag);
                 }
+                Err(e) => {
+                    context.insert("warning", format!("Failed to get latest image tag: {}", e).as_str());
+                }
+            }
+
+            // Handle the current tag result and insert container version into context
+            match current_tag_result {
+                Ok(ref tag) => {
+                    context.insert("container_version", tag);  // Insert current container version into context
+                    current_tag_opt = Some(tag.clone());
+                }
+                Err(e) => {
+                    context.insert("container_version", format!("Failed to get container version: {}", e).as_str());
+                    context.insert("warning", format!("Failed to get current container image tag: {}", e).as_str());
+                }
+            }
+
+            // Compare the tags if both are available
+            if let (Some(latest_tag), Some(current_tag)) = (&latest_tag_opt, &current_tag_opt) {
+                if latest_tag != current_tag {
+                    // An update is available, insert into context
+                    context.insert("update_available", latest_tag);
+                }
+                // Else, no update is available
             }
 
             // Render the dashboard.html template
