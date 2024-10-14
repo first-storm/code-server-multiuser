@@ -27,23 +27,25 @@ impl ContainerManager {
     }
 
     /// Update an existing Docker container
-    pub fn update_container(uid: &str) -> io::Result<()> {
+    pub fn update_container(uid: &str, token: &str, traefik_instances: &mut traefik::Instances) -> io::Result<()> {
         let container_id = format!("{}.codeserver", uid);
-
-        // Check if the container is running, if so, stop it
+        
         if Self::is_container_running(uid)? {
-            Self::stop_container(&container_id, &mut traefik::Instances::new())?;
+            Self::stop_container(&container_id, traefik_instances)?;
         }
-
-        // Remove the existing container
+        
         Self::remove_container(&container_id)?;
-
-        // Pull the latest image
+        
         Self::pull_latest_image()?;
+        
+        Self::run_docker_create_command(uid)?;
+        
+        Self::start_container(&container_id, token, traefik_instances)?;
 
-        // Recreate the container
-        Self::run_docker_create_command(uid)
+        Ok(())
     }
+
+
 
     /// Start Docker container
     pub fn start_container(
@@ -377,6 +379,7 @@ impl ContainerManager {
         // Get list of tags
         let tags_url = format!("https://ghcr.io/v2/{}/{}/tags/list", user, image);
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct TagsResponse {
             name: String,
             tags: Vec<String>,

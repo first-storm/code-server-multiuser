@@ -5,9 +5,9 @@ use log::{error, info, warn};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::fmt;
+use std::{fmt, io};
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, ErrorKind};
 
 use super::container::ContainerManager;
 
@@ -259,5 +259,22 @@ impl UserDB {
     /// Finds a user by their UID with a mutable reference.
     pub fn find_user_by_uid_mut(&mut self, uid: isize) -> Option<&mut User> {
         self.users.iter_mut().find(|user| user.uid == uid)
+    }
+
+    pub fn update_user_container(&mut self, uid: isize) -> io::Result<()> {
+        // First, find the user and clone the token if it exists
+        let token = if let Some(user) = self.find_user_by_uid_mut(uid) {
+            user.token.clone()
+        } else {
+            return Err(io::Error::new(ErrorKind::NotFound, "未找到用户"));
+        };
+
+        // Now, perform the mutable operation on traefik_instances
+        if let Some(token) = token {
+            ContainerManager::update_container(&uid.to_string(), &token, &mut self.traefik_instances)?;
+            Ok(())
+        } else {
+            Err(io::Error::new(ErrorKind::Other, "用户未登录"))
+        }
     }
 }

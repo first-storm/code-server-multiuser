@@ -361,11 +361,18 @@ async fn update_container(
         } // The scope of db_guard ends here, releasing the lock on db
 
         // Update the container in an asynchronous task
+        // Clone the db and move it into the closure
         let db_clone = db.clone();
+
+        // Spawn an asynchronous task
         actix_web::rt::spawn(async move {
-            match ContainerManager::update_container(&uid.to_string()) {
+            // Lock the Mutex to get a mutable reference to UserDB
+            let mut db_guard = db_clone.lock().await;
+
+            // Call the method on the locked UserDB instance
+            match db_guard.update_user_container(uid) {
                 Ok(_) => {
-                    let mut db_guard = db_clone.lock().await;
+                    // Set is_updating to false after the update
                     if let Some(user_mut) = db_guard.find_user_by_uid_mut(uid) {
                         user_mut.is_updating = false;
                     }
@@ -376,6 +383,7 @@ async fn update_container(
                 }
             }
         });
+
 
         return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
     }
