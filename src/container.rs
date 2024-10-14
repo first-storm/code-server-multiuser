@@ -29,24 +29,24 @@ impl ContainerManager {
     /// Update an existing Docker container
     pub fn update_container(uid: &str, token: &str, traefik_instances: &mut traefik::Instances) -> io::Result<()> {
         let container_id = format!("{}.codeserver", uid);
-        
+
         if Self::is_container_running(uid)? {
             Self::stop_container(&container_id, traefik_instances)?;
         }
-        
+
         Self::remove_container(&container_id)?;
-        
+
         Self::pull_latest_image()?;
-        
+
         Self::run_docker_create_command(uid)?;
-        
+
         Self::start_container(&container_id, token, traefik_instances)?;
 
         Ok(())
     }
 
 
-    
+
     /// Start Docker container
     pub fn start_container(
         container_id: &str,
@@ -250,7 +250,7 @@ impl ContainerManager {
             //     uid,
             //     "/home/coder/projects"
             // ))
-            // 
+            //
             .arg("-v")
             .arg(format!(
                 "/mnt/code-data/{}.data/home:/home/coder",
