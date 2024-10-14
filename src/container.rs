@@ -268,6 +268,8 @@ fi"#.to_string();
             // .arg(format!("PASSWORD={}", password))
             .arg("-e")
             .arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#)
+            .arg("-e")
+            .arg("XDG_DATA_HOME=/home/coder/.local/share") // Added environment variable
             .arg("--storage-opt")
             .arg("size=1G")
             .arg("--network")
