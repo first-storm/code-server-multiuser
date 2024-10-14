@@ -15,7 +15,6 @@ use crate::{
 
 use log::{error, info};
 use regex::Regex;
-use semver::Version;
 use serde::Deserialize;
 use users::{get_current_gid, get_current_uid};
 
@@ -368,33 +367,44 @@ impl ContainerManager {
         struct TokenResponse {
             token: String,
         }
-        let token_resp: TokenResponse = client.get(&token_url).send().map_err(|e| io::Error::new(ErrorKind::Other, e))?.json().map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+        let token_resp: TokenResponse = client
+            .get(&token_url)
+            .send()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
+            .json()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Get list of tags
         let tags_url = format!("https://ghcr.io/v2/{}/{}/tags/list", user, image);
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct TagsResponse {
             name: String,
             tags: Vec<String>,
         }
-        let tags_resp: TagsResponse = client.get(&tags_url).header("Authorization", format!("Bearer {}", token_resp.token)).send().map_err(|e| io::Error::new(ErrorKind::Other, e))?.json().map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+        let tags_resp: TagsResponse = client
+            .get(&tags_url)
+            .header("Authorization", format!("Bearer {}", token_resp.token))
+            .send()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
+            .json()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
         // Iterate over tags and extract versions
-        fn extract_version(tag: &str) -> Option<Version> {
-            // Match tags that are exactly x.y.z
-            let re = Regex::new(r"^(\d+\.\d+\.\d+)$").unwrap();
+        fn extract_version(tag: &str) -> Option<(u64, u64, u64, u64)> {
+            let re = Regex::new(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$").unwrap();
             if let Some(caps) = re.captures(tag) {
-                let version_str = caps.get(1).unwrap().as_str();
-                if let Ok(version) = Version::parse(version_str) {
-                    return Some(version);
-                }
+                let a = caps.get(1)?.as_str().parse::<u64>().ok()?;
+                let b = caps.get(2)?.as_str().parse::<u64>().ok()?;
+                let c = caps.get(3)?.as_str().parse::<u64>().ok()?;
+                let d = caps.get(4)?.as_str().parse::<u64>().ok()?;
+                Some((a, b, c, d))
+            } else {
+                None
             }
-            None
         }
 
         // Collect all valid versions and corresponding tags
-        let mut version_tags: HashMap<Version, String> = HashMap::new();
+        let mut version_tags: HashMap<(u64, u64, u64, u64), String> = HashMap::new();
 
         for tag in tags_resp.tags {
             if let Some(version) = extract_version(&tag) {
