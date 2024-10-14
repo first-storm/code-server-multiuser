@@ -1,15 +1,23 @@
-use crate::storage::DATADIR;
-use crate::traefik::{self, Instance};
-use log::{error, info};
-use std::env;
-use std::fs;
-use std::io::{self, ErrorKind};
-use std::path::Path;
-use std::process::Command;
-use std::time::SystemTime;
-use users::{get_current_gid, get_current_uid};
+use std::{
+    collections::HashMap,
+    env,
+    fs,
+    io::{self, ErrorKind},
+    path::Path,
+    process::Command,
+    time::SystemTime,
+};
 
-const DOCKER_IMAGE: &str = "ghcr.io/first-storm/code-server-docker-localization-gcc";
+use crate::{
+    storage::{DATADIR, DOCKER_IMAGE},
+    traefik::{self, Instance},
+};
+
+use log::{error, info};
+use regex::Regex;
+use semver::Version;
+use serde::Deserialize;
+use users::{get_current_gid, get_current_uid};
 
 pub struct ContainerManager;
 
@@ -199,7 +207,7 @@ impl ContainerManager {
 
         // Get the latest image tag
         let latest_tag = Self::get_latest_image_tag()?;
-        let image_with_tag = format!("{}:{}", DOCKER_IMAGE, latest_tag);
+        let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), latest_tag);
 
         // Build Docker create command
         let mut command = Command::new("docker");
@@ -270,7 +278,7 @@ impl ContainerManager {
     /// Private function to pull the latest Docker image
     fn pull_latest_image() -> io::Result<()> {
         let latest_tag = Self::get_latest_image_tag()?;
-        let image_with_tag = format!("{}:{}", DOCKER_IMAGE, latest_tag);
+        let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), latest_tag);
 
         let output = Command::new("docker").arg("pull").arg(&image_with_tag).output()?;
 
@@ -290,7 +298,7 @@ impl ContainerManager {
         }
     }
 
-    /// Function 1: Get the tag of a container given its ID
+    /// Get the tag of a container given its ID
     pub fn get_container_tag(container_id: &str) -> io::Result<String> {
         let output = Command::new("docker").arg("inspect").arg("--format").arg("{{.Config.Image}}").arg(container_id).output()?;
 
@@ -312,11 +320,11 @@ impl ContainerManager {
         }
     }
 
-    /// Function 2: Get the latest tag version of the image, with a one-hour cache
+    /// Get the latest tag version of the image, with a one-hour cache
     pub fn get_latest_image_tag() -> io::Result<String> {
         let cache_file = "/tmp/docker_image_latest_tag.cache";
 
-        // Check if cache file exists and is less than one hour old
+        // Check if the cache file exists and is within one hour
         if Path::new(cache_file).exists() {
             let metadata = fs::metadata(cache_file)?;
             let modified_time = metadata.modified()?;
@@ -329,19 +337,100 @@ impl ContainerManager {
             }
         }
 
-        // Fetch the latest tag from the registry (This requires authentication for ghcr.io)
-        // For simplicity, we'll assume the latest tag is 'latest'
-        // If you need to fetch the actual latest tag, you'll need to implement authentication
+        // Parse DOCKER_IMAGE
+        let docker_image = DOCKER_IMAGE.as_str();
+        let parts: Vec<&str> = docker_image.split('/').collect();
+        if parts.len() != 3 {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "Invalid DOCKER_IMAGE format. Expected format: registry/user/image",
+            ));
+        }
+        let registry = parts[0];
+        let user = parts[1];
+        let image = parts[2];
+        if registry != "ghcr.io" {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "Registry not supported. Only 'ghcr.io' is supported.",
+            ));
+        }
 
-        let latest_tag = "latest".to_string();
+        // Create HTTP client
+        let client = reqwest::blocking::Client::new();
 
-        // Write the latest tag to the cache file
+        // Get token (for public images, a fake NOOP token is sufficient)
+        let token_url = format!(
+            "https://ghcr.io/token?scope=repository:{}%2F{}:pull",
+            user, image
+        );
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            token: String,
+        }
+        let token_resp: TokenResponse = client
+            .get(&token_url)
+            .send()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
+            .json()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+
+        // Get list of tags
+        let tags_url = format!("https://ghcr.io/v2/{}/{}/tags/list", user, image);
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct TagsResponse {
+            name: String,
+            tags: Vec<String>,
+        }
+        let tags_resp: TagsResponse = client
+            .get(&tags_url)
+            .header("Authorization", format!("Bearer {}", token_resp.token))
+            .send()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?
+            .json()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+
+        // Iterate over tags and extract versions
+        fn extract_version(tag: &str) -> Option<Version> {
+            // Match tags that are exactly x.y.z
+            let re = Regex::new(r"^(\d+\.\d+\.\d+)$").unwrap();
+            if let Some(caps) = re.captures(tag) {
+                let version_str = caps.get(1).unwrap().as_str();
+                if let Ok(version) = Version::parse(version_str) {
+                    return Some(version);
+                }
+            }
+            None
+        }
+
+        // Collect all valid versions and corresponding tags
+        let mut version_tags: HashMap<Version, String> = HashMap::new();
+
+        for tag in tags_resp.tags {
+            if let Some(version) = extract_version(&tag) {
+                version_tags.insert(version, tag);
+            }
+        }
+
+        if version_tags.is_empty() {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "No valid version tags found",
+            ));
+        }
+
+        // Find the highest version
+        let latest_version = version_tags.keys().max().unwrap();
+        let latest_tag = version_tags.get(latest_version).unwrap().clone();
+
+        // Cache the latest tag
         fs::write(cache_file, &latest_tag)?;
 
         Ok(latest_tag)
     }
 
-    /// Function 3: Check if a container is using the latest version
+    /// Check if a container is using the latest version
     pub fn is_container_latest_version(container_id: &str) -> io::Result<bool> {
         let container_tag = Self::get_container_tag(container_id)?;
         let latest_tag = Self::get_latest_image_tag()?;

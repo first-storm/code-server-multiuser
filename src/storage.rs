@@ -24,3 +24,11 @@ pub static UID_WHITELIST: Lazy<String> = Lazy::new(|| {
 pub static DOMAIN: Lazy<String> = Lazy::new(|| {
     env::var("DOMAIN").expect("Environment variable 'DOMAIN' not set")
 });
+
+pub static DOCKER_IMAGE: Lazy<String> = Lazy::new(|| {
+    env::var("DOCKER_IMAGE").expect("Environment variable 'DOCKER_IMAGE' not set.")
+});
+
+// pub static GITHUB_TOKEN: Lazy<String> = Lazy::new(|| {
+//     env::var("GITHUB_TOKEN").expect("Environment variable 'GITHUB_TOKEN' not set")
+// });
