@@ -46,7 +46,7 @@ impl ContainerManager {
     }
 
 
-
+    
     /// Start Docker container
     pub fn start_container(
         container_id: &str,
@@ -57,6 +57,28 @@ impl ContainerManager {
 
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
+
+            // Execute the command inside the container
+            let exec_output = Command::new("docker")
+                .arg("exec")
+                .arg(container_id)
+                .arg("ln")
+                .arg("-s")
+                .arg("/home/defaultconfig/.local/share/code-server/extensions")
+                .arg("/home/coder/.local/share/code-server/extensions")
+                .output()?;
+
+            if exec_output.status.success() {
+                info!("Successfully executed command in container: {}", container_id);
+            } else {
+                let error_message = format!(
+                    "Failed to execute command in container: {}. Error: {}",
+                    container_id,
+                    String::from_utf8_lossy(&exec_output.stderr)
+                );
+                error!("{}", error_message);
+                return Err(io::Error::new(ErrorKind::Other, error_message));
+            }
 
             if let Err(e) = traefik_instances.add(Instance {
                 name: container_id.to_string(),
@@ -78,6 +100,7 @@ impl ContainerManager {
             Err(io::Error::new(ErrorKind::Other, error_message))
         }
     }
+
 
     /// Stop Docker container
     pub fn stop_container(
