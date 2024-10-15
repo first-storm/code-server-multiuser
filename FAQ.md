@@ -26,6 +26,15 @@
 
 可能有几个原因。最常见的是服务器性能不足，因为我的服务器配置较低，资金有限。如果大家有兴趣，欢迎捐助我。
 
-![06b1d6ed-3c3f-4b8a-b5fc-e863760e9e95.jpeg](https://s2.loli.net/2024/10/15/kUwr1l4CspxEKa6.jpg)
+<table>
+  <tr>
+    <td><img src="https://s2.loli.net/2024/10/15/uh95G7ixRvKeSIr.png" alt="WeChat Pay" width="200"></td>
+    <td><img src="https://s2.loli.net/2024/10/15/tCLGeFiucNxaKQ9.png" alt="Alipay" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center">微信支付</td>
+    <td align="center">支付宝</td>
+  </tr>
+</table>
 
 另一个原因是我的服务器在日本，晚上网络可能不稳定。我会在域名备案后解决这个问题，备案后就可以使用全球CDN，在国内架设服务器了。
