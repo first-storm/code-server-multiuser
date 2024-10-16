@@ -44,10 +44,7 @@ impl ContainerManager {
 
         Ok(())
     }
-
-
-
-    /// Start Docker container
+    
     /// Start Docker container
     pub fn start_container(
         container_id: &str,
@@ -60,10 +57,15 @@ impl ContainerManager {
             info!("Successfully started container: {}", container_id);
 
             // Execute command inside the container
-            let exec_command = r#"if [ ! -e /home/coder/.local/share/code-server/extensions ]; then \
-mkdir -p /home/coder/.local/share/code-server/ && \
-ln -s /home/defaultconfig/.local/share/code-server/extensions /home/coder/.local/share/code-server/extensions; \
-fi"#.to_string();
+            let exec_command = r#"
+            mkdir -p /home/coder/.local/share/code-server/User/;
+            if [ ! -e /home/coder/.local/share/code-server/extensions ]; then
+                ln -s /home/defaultconfig/.local/share/code-server/extensions /home/coder/.local/share/code-server/extensions;
+            fi;
+            if [ ! -e /home/coder/.local/share/code-server/User/settings.json ]; then
+                cp /home/defaultconfig/.local/share/code-server/User/settings.json /home/coder/.local/share/code-server/User/settings.json;
+            fi
+        "#.to_string();
 
             let exec_output = Command::new("docker")
                 .arg("exec")
@@ -104,8 +106,7 @@ fi"#.to_string();
             Err(io::Error::new(ErrorKind::Other, error_message))
         }
     }
-
-
+    
     /// Stop Docker container
     pub fn stop_container(
         container_id: &str,
