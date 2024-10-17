@@ -175,10 +175,14 @@ impl ContainerManager {
                 }
             };
 
-            if is_expired&& user.token!=None {
+            if is_expired && user.token != None {
                 match duration {
                     Ok(duration) => {
-                        info!("User '{}' has been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
+                        if user.token != None {
+                            info!("User '{}' has been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
+                        } else {
+                            info!("User '{}' hasn't been logged in.", user.username);
+                        }
                     }
                     Err(..) => {
                         error!("Failed to check user status '{}'", user.username);

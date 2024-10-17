@@ -8,7 +8,8 @@ use std::error::Error;
 use std::{fmt, io};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-
+use std::time::SystemTime;
+use filetime::{set_file_mtime, FileTime};
 use super::container::ContainerManager;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -98,6 +99,17 @@ impl UserDB {
         Ok(())
     }
 
+    fn update_file_mtime(file_path: &str) -> io::Result<()> {
+        // Get current time
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let mtime = FileTime::from_unix_time(now.as_secs() as i64, now.subsec_nanos());
+
+        // Set file mtime
+        set_file_mtime(file_path, mtime)?;
+
+        Ok(())
+    }
+
     /// Updated login method to fix borrowing issue
     pub fn login(&mut self, username: &str, password: &str) -> Result<String, LoginError> {
         // First, find user index with an immutable borrow
@@ -122,11 +134,26 @@ impl UserDB {
             user.token = Some(token.clone());
             uid = user.uid;
         } // Mutable borrow ends here
+        
+        let refresh_heartbeat = ||{
+            // Update heartbeat file
+            match Self::update_file_mtime(&format!(
+                "{}/{}.data/home/.local/share/code-server/heartbeat",
+                *crate::storage::DATADIR, uid
+            )) {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to update heartbeat file: {}", e);
+                }
+            }
+        };
 
         // Proceed with other operations that may borrow self immutably or mutably
         // Check if the container is running
         match ContainerManager::is_container_running(&uid.to_string()) {
             Ok(true) => {
+                // Update heartbeat file
+                refresh_heartbeat();
                 info!("Container is already running for user: {}", username);
 
                 // Ensure to add a Traefik instance even if the container is running
@@ -140,6 +167,8 @@ impl UserDB {
                 })?;
             }
             Ok(false) => {
+                // Update heartbeat file
+                refresh_heartbeat();
                 // If the container is not running, start the container
                 info!("Starting container for user: {}", username);
                 ContainerManager::start_container(
