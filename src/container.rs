@@ -29,22 +29,22 @@ impl ContainerManager {
     /// Update an existing Docker container
     pub fn update_container(uid: &str, token: &str, traefik_instances: &mut traefik::Instances) -> io::Result<()> {
         let container_id = format!("{}.codeserver", uid);
-        
+
         if Self::is_container_running(uid)? {
             Self::stop_container(&container_id, traefik_instances)?;
         }
-        
+
         Self::remove_container(&container_id)?;
-        
+
         Self::pull_latest_image()?;
-        
+
         Self::run_docker_create_command(uid)?;
-        
+
         Self::start_container(&container_id, token, traefik_instances)?;
 
         Ok(())
     }
-    
+
     /// Start Docker container
     pub fn start_container(
         container_id: &str,
@@ -106,7 +106,7 @@ impl ContainerManager {
             Err(io::Error::new(ErrorKind::Other, error_message))
         }
     }
-    
+
     /// Stop Docker container
     pub fn stop_container(
         container_id: &str,
@@ -162,11 +162,17 @@ impl ContainerManager {
                 *DATADIR, user.uid
             );
 
-            let is_expired = match fs::metadata(&heartbeat_path).and_then(|metadata| metadata.modified()).and_then(|modified_time| {
+            let duration = fs::metadata(&heartbeat_path).and_then(|metadata| metadata.modified()).and_then(|modified_time| {
                 SystemTime::now().duration_since(modified_time).map_err(|e| io::Error::new(ErrorKind::Other, e))
-            }) {
-                Ok(duration) => duration.as_secs() > 1200,
-                Err(_) => false,
+            });
+
+            let is_expired = match duration {
+                Ok(duration) => {
+                    duration.as_secs() >= 1200
+                }
+                Err(..) => {
+                    false
+                }
             };
 
             if is_expired {
@@ -179,6 +185,15 @@ impl ContainerManager {
                 } else {
                     info!("Successfully logged out user '{}'", user.username);
                 }
+            } else {
+                match duration {
+                    Ok(duration) => {
+                        info!("User '{}' hasn't been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
+                    }
+                    Err(..) => {
+                        error!("Failed to check user status '{}'", user.username);
+                    }
+                };
             }
         }
     }
