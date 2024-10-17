@@ -1,0 +1,38 @@
+name: Rust CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出代码
+      - uses: actions/checkout@v3
+
+      # 设置Rust工具链为stable版本
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      # 编译项目
+      - name: Build
+        run: cargo build --verbose
+
+      # 运行测试
+      - name: Run Tests
+        run: cargo test --verbose
+
+      # 检查代码格式
+      - name: Check Formatting
+        run: cargo fmt -- --check
+
+      # 静态代码分析
+      - name: Lint with Clippy
+        uses: actions-rs/clippy-check@v1
