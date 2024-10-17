@@ -30,7 +30,7 @@
 
 选这个
 
-![Screenshot From 2024-10-15 22-34-11.png](https://s2.loli.net/2024/10/15/47HpNxKd5FTEbGq.png)
+![Screenshot From 2024-10-15 22-34-11.png]（        ）
 
 #### 6. 为啥有时候会自动登出？
 

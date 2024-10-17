@@ -2,14 +2,15 @@ use super::traefik;
 use crate::traefik::Instance;
 use bcrypt::{hash, verify};
 use log::{error, info, warn};
-use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::error::Error;
 use std::{fmt, io};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration, Instant};
 use filetime::{set_file_mtime, FileTime};
+use uuid::Uuid;
 use super::container::ContainerManager;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -25,8 +26,14 @@ pub struct User {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserDB {
     pub traefik_instances: traefik::Instances,
-    users: Vec<User>,
+    users: HashMap<isize, User>,
+    #[serde(skip)]
+    username_to_uid: HashMap<String, isize>,
+    #[serde(skip)]
+    email_to_uid: HashMap<String, isize>,
     file_path: String,
+    #[serde(skip)]
+    last_write_time: Option<Instant>, // Add this field
 }
 
 #[derive(Debug)]
@@ -50,26 +57,20 @@ impl Error for LoginError {}
 
 impl UserDB {
     /// Generates a unique token for user authentication.
-    fn generate_unique_token(&self) -> String {
-        let mut rng = rand::thread_rng();
-        loop {
-            // Generate a 16-character random combination of letters and numbers
-            let token: String = (&mut rng).sample_iter(&Alphanumeric).take(16).map(char::from).collect();
-
-            // Check if there are any duplicate tokens
-            if !self.users.iter().any(|u| u.token.as_deref() == Some(&token)) {
-                return token;
-            }
-        }
+    fn generate_unique_token() -> String {
+        Uuid::new_v4().to_string()
     }
 
     /// Creates a new `UserDB` instance with the given file path and writes the empty database to the file.
     pub fn new(file_path: &str) -> UserDB {
         info!("Creating a new user database with file path: {}", file_path);
-        let udb = UserDB {
+        let mut udb = UserDB {
             traefik_instances: traefik::Instances::new(),
-            users: Vec::new(),
+            users: HashMap::new(),
+            username_to_uid: HashMap::new(),
+            email_to_uid: HashMap::new(),
             file_path: file_path.to_string(),
+            last_write_time: None, // Initialize last_write_time
         };
         if let Err(e) = udb.write_to_file() {
             error!(
@@ -82,6 +83,13 @@ impl UserDB {
 
     /// Adds a new user to the database and writes the updated database to file.
     pub fn add_user(&mut self, mut user: User) -> Result<(), Box<dyn Error>> {
+        if self.username_exists(&user.username) {
+            return Err("Username already exists".into());
+        }
+        if self.email_exists(&user.email) {
+            return Err("Email already exists".into());
+        }
+
         user.password = hash(&user.password, bcrypt::DEFAULT_COST)?; // Hash the user's password
         info!("Adding new user: {}", user.username);
 
@@ -93,8 +101,12 @@ impl UserDB {
 
         info!("Successfully created container for user: {}", user.username);
 
-        // Add user to the user list
-        self.users.push(user);
+        // Add user to the users HashMap and update mappings
+        let uid = user.uid;
+        self.users.insert(uid, user.clone());
+        self.username_to_uid.insert(user.username.clone(), uid);
+        self.email_to_uid.insert(user.email.clone(), uid);
+
         self.write_to_file()?; // Write updated database to file
         Ok(())
     }
@@ -110,32 +122,29 @@ impl UserDB {
         Ok(())
     }
 
-    /// Updated login method to fix borrowing issue
     pub fn login(&mut self, username: &str, password: &str) -> Result<String, LoginError> {
-        // First, find user index with an immutable borrow
-        let user_idx = self.users.iter().position(|u| u.username == username).ok_or_else(|| {
+        // First, get user UID from username_to_uid
+        let uid = self.username_to_uid.get(username).ok_or_else(|| {
             warn!("User '{}' not found", username);
             LoginError::UserNotFound
         })?;
-
-        // Verify password using an immutable borrow
-        if !verify(password, &self.users[user_idx].password).map_err(|_| LoginError::IncorrectPassword)? {
+        // Borrow the user mutably
+        let user = self.users.get_mut(uid).ok_or_else(|| {
+            warn!("User '{}' not found in users HashMap", username);
+            LoginError::UserNotFound
+        })?;
+        // Verify password
+        if !verify(password, &user.password).map_err(|_| LoginError::IncorrectPassword)? {
             warn!("Incorrect password for user: {}", username);
             return Err(LoginError::IncorrectPassword);
         }
 
-        // Generate a unique token (immutable borrow of self)
-        let token = self.generate_unique_token();
+        // Generate a unique token
+        let token = UserDB::generate_unique_token();
+        user.token = Some(token.clone());
+        let uid = *uid;
 
-        let uid;
-        // Now borrow the user mutably in a new scope to set the token
-        {
-            let user = &mut self.users[user_idx];
-            user.token = Some(token.clone());
-            uid = user.uid;
-        } // Mutable borrow ends here
-        
-        let refresh_heartbeat = ||{
+        let refresh_heartbeat = || {
             // Update heartbeat file
             match Self::update_file_mtime(&format!(
                 "{}/{}.data/home/.local/share/code-server/heartbeat",
@@ -148,8 +157,7 @@ impl UserDB {
             }
         };
 
-        // Proceed with other operations that may borrow self immutably or mutably
-        // Check if the container is running
+        // Proceed with other operations
         match ContainerManager::is_container_running(&uid.to_string()) {
             Ok(true) => {
                 // Update heartbeat file
@@ -193,7 +201,7 @@ impl UserDB {
 
     pub fn logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
         // Find the user mutably
-        if let Some(user) = self.users.iter_mut().find(|u| u.uid == uid) {
+        if let Some(user) = self.users.get_mut(&uid) {
             // Logout the user
             ContainerManager::logout_user(user, &mut self.traefik_instances)?;
             info!("User '{}' logged out successfully", user.username);
@@ -212,15 +220,15 @@ impl UserDB {
 
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        ContainerManager::check_expiration(&mut self.users, &mut self.traefik_instances);
+        ContainerManager::check_expiration(&mut self.users.values_mut().collect::<Vec<_>>(), &mut self.traefik_instances);
     }
 
     /// Logs out all users by stopping their containers and clearing their tokens.
     pub fn logout_all_users(&mut self) -> Result<(), Box<dyn Error>> {
-        ContainerManager::logout_all_users(&mut self.users, &mut self.traefik_instances)?;
+        ContainerManager::logout_all_users(&mut self.users.values_mut().collect::<Vec<_>>(), &mut self.traefik_instances)?;
 
         // Clear tokens for all users
-        for user in &mut self.users {
+        for user in self.users.values_mut() {
             user.token = None;
         }
 
@@ -232,31 +240,42 @@ impl UserDB {
 
     /// Check if a username exists in the database.
     pub fn username_exists(&self, username: &str) -> bool {
-        self.users.iter().any(|u| u.username == username)
+        self.username_to_uid.contains_key(username)
     }
 
     /// Check if an email exists in the database.
     pub fn email_exists(&self, email: &str) -> bool {
-        self.users.iter().any(|u| u.email == email)
+        self.email_to_uid.contains_key(email)
     }
 
     /// Check if a UID exists in the database.
     pub fn uid_exists(&self, uid: isize) -> bool {
-        self.users.iter().any(|u| u.uid == uid)
+        self.users.contains_key(&uid)
     }
 
     /// Retrieve a user by their username.
     #[allow(dead_code)]
     pub fn get_user_by_username(&self, username: &str) -> Option<&User> {
-        self.users.iter().find(|u| u.username == username)
+        if let Some(uid) = self.username_to_uid.get(username) {
+            self.users.get(uid)
+        } else {
+            None
+        }
     }
 
     /// Writes the current user database to a file in JSON format.
-    pub fn write_to_file(&self) -> Result<(), Box<dyn Error>> {
-        let file = OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &self)?;
-        info!("User database written to file: {}", self.file_path);
+    pub fn write_to_file(&mut self) -> Result<(), Box<dyn Error>> {
+        let now = Instant::now();
+        // Check if it's time to write to the file
+        if self.last_write_time.is_none() || now.duration_since(self.last_write_time.unwrap()) >= Duration::from_secs(600) {
+            let file = OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path)?;
+            let writer = BufWriter::new(file);
+            serde_json::to_writer_pretty(writer, &self)?;
+            info!("User database written to file: {}", self.file_path);
+            self.last_write_time = Some(now); // Update the last write time
+        } else {
+            info!("Skipping write_to_file; less than 10 minutes since last write");
+        }
         Ok(())
     }
 
@@ -266,36 +285,46 @@ impl UserDB {
         let reader = BufReader::new(file);
         let mut userdb: UserDB = serde_json::from_reader(reader)?;
         userdb.file_path = file_path.to_string();
+        userdb.last_write_time = Some(Instant::now()); // Initialize last_write_time
         info!("User database loaded from file: {}", file_path);
+
+        // Rebuild username_to_uid and email_to_uid mappings
+        userdb.username_to_uid = HashMap::new();
+        userdb.email_to_uid = HashMap::new();
+        for (uid, user) in &userdb.users {
+            userdb.username_to_uid.insert(user.username.clone(), *uid);
+            userdb.email_to_uid.insert(user.email.clone(), *uid);
+        }
+
         Ok(userdb)
     }
 
     /// Finds a user by their token.
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
-        self.users.iter().find(|user| user.token.as_deref() == Some(token))
+        self.users.values().find(|user| user.token.as_deref() == Some(token))
     }
 
     pub fn find_user_by_token_mut(&mut self, token: &str) -> Option<&mut User> {
-        self.users.iter_mut().find(|user| user.token.as_deref() == Some(token))
+        self.users.values_mut().find(|user| user.token.as_deref() == Some(token))
     }
 
     /// Finds a user by their UID.
     #[allow(dead_code)]
     pub fn find_user_by_uid(&self, uid: isize) -> Option<&User> {
-        self.users.iter().find(|user| user.uid == uid)
+        self.users.get(&uid)
     }
 
     /// Finds a user by their UID with a mutable reference.
     pub fn find_user_by_uid_mut(&mut self, uid: isize) -> Option<&mut User> {
-        self.users.iter_mut().find(|user| user.uid == uid)
+        self.users.get_mut(&uid)
     }
 
     pub fn update_user_container(&mut self, uid: isize) -> io::Result<()> {
         // First, find the user and clone the token if it exists
-        let token = if let Some(user) = self.find_user_by_uid_mut(uid) {
+        let token = if let Some(user) = self.users.get(&uid) {
             user.token.clone()
         } else {
-            return Err(io::Error::new(ErrorKind::NotFound, "未找到用户"));
+            return Err(io::Error::new(ErrorKind::NotFound, "User not found"));
         };
 
         // Now, perform the mutable operation on traefik_instances
@@ -303,7 +332,29 @@ impl UserDB {
             ContainerManager::update_container(&uid.to_string(), &token, &mut self.traefik_instances)?;
             Ok(())
         } else {
-            Err(io::Error::new(ErrorKind::Other, "用户未登录"))
+            Err(io::Error::new(ErrorKind::Other, "User not logged in"))
+        }
+    }
+}
+
+// Implement Drop to ensure data is written when the program exits
+impl Drop for UserDB {
+    fn drop(&mut self) {
+        // Force write to file on drop
+        let now = Instant::now();
+        match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
+            Ok(file) => {
+                let writer = BufWriter::new(file);
+                if let Err(e) = serde_json::to_writer_pretty(writer, &self) {
+                    error!("Failed to write user database on drop: {}", e);
+                } else {
+                    info!("User database written to file on drop: {}", self.file_path);
+                    self.last_write_time = Some(now);
+                }
+            },
+            Err(e) => {
+                error!("Failed to open file for writing on drop: {}", e);
+            }
         }
     }
 }

@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tera::{Context, Tera};
 use tokio::{
     signal::unix::{signal, SignalKind},
-    sync::Mutex,
+    sync::RwLock,
     time::sleep,
 };
 
@@ -38,16 +38,15 @@ async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_we
         }
     };
 
-    // Lock the current database and replace it with the reloaded one
+    // Replace the current database with the reloaded one
     {
-        let mut db_lock = db.lock().await;
-        *db_lock = new_db;
+        let mut db_write = db.write().await;
+        *db_write = new_db;
     }
 
     info!("Database reloaded successfully from file: {}", db_file_path);
     Ok(HttpResponse::Ok().body("Database reloaded successfully."))
 }
-
 
 /// Renders the login page. If there is a message (e.g., login failed), it will be passed to the template.
 async fn login_page(
@@ -108,7 +107,7 @@ async fn page_404(tera: web::Data<Tera>) -> Result<HttpResponse, actix_web::Erro
     Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
 }
 
-type SharedUserDB = Arc<Mutex<UserDB>>;
+type SharedUserDB = Arc<RwLock<UserDB>>;
 
 #[derive(Deserialize)]
 struct LoginForm {
@@ -191,7 +190,7 @@ async fn register(
         }
 
         // Lock the database
-        let mut db = db.lock().await;
+        let mut db = db.write().await;
 
         // Check if the username already exists
         if db.username_exists(&username) {
@@ -244,36 +243,32 @@ async fn register(
     }
 }
 
-
 async fn logout(db: web::Data<SharedUserDB>, req: actix_web::HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     if let Some(token_cookie) = req.cookie("auth_token") {
         let token = token_cookie.value().to_string();
 
         // Lock the db to find the user associated with the token
-        let user;
-        {
-            let db = db.lock().await;
-            user = db.find_user_by_token(&token).cloned();  // Clone the user out of the lock scope
-        }
+        let uid_option = {
+            let db_read = db.read().await;
+            db_read.find_user_by_token(&token).map(|user| user.uid)
+        };
 
-        return if let Some(user) = user {
-            // Now that the user has been cloned, we can lock the db mutably
-            let mut db = db.lock().await;
-            db.logout(user.uid).expect("Failed to logout. Maybe it is because permission problem");
+        return if let Some(uid) = uid_option {
+            let mut db_write = db.write().await;
+            db_write.logout(uid).expect("Failed to logout. Maybe it is because of permission problem");
             Ok(HttpResponse::Found() // Use Found for 302 redirect
                 .append_header(("LOCATION", "/login")).finish())
         } else {
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        };
+        }
     }
 
     // If no auth_token is found, redirect to the login page
     warn!("auth_token not found, redirecting to login page.");
     Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
 }
-
 
 /// Handles user login logic for both GET (render page) and POST (process login).
 async fn login(
@@ -287,8 +282,8 @@ async fn login(
         let token = auth_cookie.value();
 
         // Lock the database and find the user
-        let db = db.lock().await;
-        if let Some(user) = db.find_user_by_token(token) {
+        let db_read = db.read().await;
+        if let Some(user) = db_read.find_user_by_token(token) {
             // If user is found, redirect to dashboard
             info!("User {} already logged in, redirecting to dashboard.", user.username);
             return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
@@ -299,8 +294,8 @@ async fn login(
     if let Some(form) = form {
         let LoginForm { username, password } = form.into_inner();
 
-        let mut db = db.lock().await;
-        return if let Ok(token) = db.login(&username, &password) {
+        let mut db_write = db.write().await;
+        return if let Ok(token) = db_write.login(&username, &password) {
             info!("User {} logged in successfully.", username);
 
             let cookie = CookieBuilder::new("auth_token", token).domain(&*storage::DOMAIN).path("/").http_only(true).secure(true).max_age(cookie::time::Duration::days(30)).finish();
@@ -316,6 +311,7 @@ async fn login(
     info!("Displaying login page.");
     login_page(tera, None).await
 }
+
 async fn update_container(
     db: web::Data<SharedUserDB>,
     req: actix_web::HttpRequest,
@@ -325,61 +321,41 @@ async fn update_container(
         let token = auth_cookie.value().to_string();
 
         // Lock the database and find the user
-        let uid;
-        {
-            let mut db_guard = db.lock().await;
-            if let Some(user) = db_guard.find_user_by_token(token.as_str()) {
-                uid = user.uid.clone();
-                info!("User {} already logged in, updating.", user.username);
+        let uid_option = {
+            let db_read = db.read().await;
+            db_read.find_user_by_token(&token).map(|user| user.uid)
+        };
 
-                // Check if the container is the latest version
-                match ContainerManager::is_container_latest_version(format!("{}.codeserver", user.uid).as_str()) {
-                    Ok(true) => {
-                        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
-                    }
-                    Ok(false) => {
-                        // Mark the user as updating
-                        if let Some(user_mut) = db_guard.find_user_by_token_mut(token.as_str()) {
-                            user_mut.is_updating = true;
+        return if let Some(uid) = uid_option {
+            // Clone the db and move it into the closure
+            let db_clone = db.clone();
+
+            // Spawn an asynchronous task
+            actix_web::rt::spawn(async move {
+                // Lock the Mutex to get a mutable reference to UserDB
+                let mut db_write = db_clone.write().await;
+
+                // Call the method on the locked UserDB instance
+                match db_write.update_user_container(uid) {
+                    Ok(_) => {
+                        // Set is_updating to false after the update
+                        if let Some(user_mut) = db_write.find_user_by_uid_mut(uid) {
+                            user_mut.is_updating = false;
                         }
+                        info!("Container for user {} updated successfully.", uid);
                     }
-                    Err(..) => {
-                        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+                    Err(e) => {
+                        error!("Failed to update container for user {}: {}", uid, e);
                     }
                 }
-            } else {
-                // If the user is not found, redirect to the dashboard
-                info!("Redirect to dashboard.");
-                return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
-            }
-        } // The scope of db_guard ends here, releasing the lock on db
+            });
 
-        // Update the container in an asynchronous task
-        // Clone the db and move it into the closure
-        let db_clone = db.clone();
-
-        // Spawn an asynchronous task
-        actix_web::rt::spawn(async move {
-            // Lock the Mutex to get a mutable reference to UserDB
-            let mut db_guard = db_clone.lock().await;
-
-            // Call the method on the locked UserDB instance
-            match db_guard.update_user_container(uid) {
-                Ok(_) => {
-                    // Set is_updating to false after the update
-                    if let Some(user_mut) = db_guard.find_user_by_uid_mut(uid) {
-                        user_mut.is_updating = false;
-                    }
-                    info!("Container for user {} updated successfully.", uid);
-                }
-                Err(e) => {
-                    error!("Failed to update container for user {}: {}", uid, e);
-                }
-            }
-        });
-
-
-        return Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish());
+            Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish())
+        } else {
+            // If the user is not found, redirect to the dashboard
+            info!("User not found, redirecting to dashboard.");
+            Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish())
+        }
     }
 
     info!("Redirect to dashboard.");
@@ -397,10 +373,10 @@ async fn dashboard(
         let token = auth_cookie.value();
 
         // Lock the database to find the user by token
-        let db = db.lock().await;
+        let db_read = db.read().await;
 
         // Try to find the user by token
-        return if let Some(user) = db.find_user_by_token(token) {
+        return if let Some(user) = db_read.find_user_by_token(token) {
             // If the user is found, prepare to render the dashboard page
             let mut context = Context::new();
             context.insert("username", &user.username);  // Insert username into the context
@@ -470,7 +446,7 @@ async fn dashboard(
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        };
+        }
     }
 
     // If no auth_token is found, redirect to the login page
@@ -486,14 +462,13 @@ async fn index_page(
     let mut context = Context::new();
 
     // Check if the user is logged in
-    let mut logged_in = false;
-    if let Some(auth_cookie) = req.cookie("auth_token") {
+    let logged_in = if let Some(auth_cookie) = req.cookie("auth_token") {
         let token = auth_cookie.value();
-        let db = db.lock().await;
-        if let Some(_user) = db.find_user_by_token(token) {
-            logged_in = true;
-        }
-    }
+        let db_read = db.read().await;
+        db_read.find_user_by_token(token).is_some()
+    } else {
+        false
+    };
     context.insert("logged_in", &logged_in);
 
     // Render the index.html template
@@ -511,8 +486,8 @@ async fn expiration_checker(db: SharedUserDB) {
     loop {
         {
             // Lock the database and check for expired containers
-            let mut db_guard = db.lock().await;
-            db_guard.check_expiration();  // Check expiration of containers
+            let mut db_write = db.write().await;
+            db_write.check_expiration();  // Check expiration of containers
         }
         info!("The expired users have already been checked.");
         sleep(Duration::from_secs(60)).await; // Sleep for 60 seconds before re-checking
@@ -532,10 +507,10 @@ async fn main() -> io::Result<()> {
     // Initialize shared database
     let shared_database = if !Path::new(storage::USERDB.as_str()).exists() {
         info!("Database not found: {}. Creating new database...", storage::USERDB.as_str());
-        Arc::new(Mutex::new(UserDB::new(storage::USERDB.as_str())))
+        Arc::new(RwLock::new(UserDB::new(storage::USERDB.as_str())))
     } else {
         info!("Database exists: {}", &*storage::USERDB);
-        Arc::new(Mutex::new(match UserDB::read_from_file(storage::USERDB.as_str()) {
+        Arc::new(RwLock::new(match UserDB::read_from_file(storage::USERDB.as_str()) {
             Ok(db) => db,
             Err(_) => {
                 error!("Cannot read from database: {}. Please check access permissions.", storage::USERDB.as_str());
@@ -568,7 +543,7 @@ async fn main() -> io::Result<()> {
         // For non-Unix platforms, use ctrl_c()
         #[cfg(not(unix))]
         {
-            signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+            tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         }
 
         // Perform the shutdown procedure (save the database, etc.)
@@ -581,14 +556,24 @@ async fn main() -> io::Result<()> {
 
     // Start the HTTP server and share the database
     let srv = HttpServer::new(move || {
-        App::new().app_data(web::Data::new(tera.clone())) // Add Tera template engine to app state
+        App::new()
+            .app_data(web::Data::new(tera.clone())) // Add Tera template engine to app state
             .app_data(web::Data::new(shared_database.clone())) // Share the database
+            .wrap(actix_web::middleware::Logger::default()) // Enable logger middleware
             .route("/login", web::get().to(login)) // Handle GET requests for login page
             .route("/login", web::post().to(login)) // Handle POST requests for login form
             .route("/register", web::get().to(register)) // Handle GET requests for registration page
             .route("/register", web::post().to(register)) // Handle POST requests for registration form
-            .route("/dashboard", web::get().to(dashboard)).route("/logout", web::get().to(logout)).route("/", web::get().to(index_page)).route("/reloaddb", web::get().to(reload_db)).route("/upgrade", web::get().to(update_container)).default_service(web::route().to(page_404)) // Default handler for 404 pages
-    }).bind("127.0.0.1:8080")?.run().await;
+            .route("/dashboard", web::get().to(dashboard))
+            .route("/logout", web::get().to(logout))
+            .route("/", web::get().to(index_page))
+            .route("/reloaddb", web::get().to(reload_db))
+            .route("/upgrade", web::get().to(update_container))
+            .default_service(web::route().to(page_404)) // Default handler for 404 pages
+    })
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await;
 
     srv
 }
@@ -598,16 +583,10 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
     info!("Shutting down the server...");
 
     // Lock the database to save it
-    let mut db = shared_db.lock().await;
-    let db_file_path = storage::USERDB.as_str();
+    let mut db = shared_db.write().await;
     match &db.logout_all_users() {
         Ok(()) => info!("All users have been successfully logged out."),
         Err(e) => error!("Error logging out users during shutdown: {}", e),
-    }
-
-    match &db.write_to_file() {
-        Ok(_) => info!("Database has been successfully saved to {}", db_file_path),
-        Err(e) => error!("Error occurred while saving the database: {}", e),
     }
 
     match &db.traefik_instances.shutdown() {
@@ -615,7 +594,9 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
         Err(e) => error!("Error shutting down Traefik instances: {}", e),
     }
 
-    // delete /tmp/docker_image_latest_tag.cache
+    drop(db);
+
+    // Delete /tmp/docker_image_latest_tag.cache
     let cache_file = "/tmp/docker_image_latest_tag.cache";
     if Path::new(cache_file).exists() {
         match fs::remove_file(cache_file) {

@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::{fs, io};
+use std::{collections::HashMap, fs, io};
+
+use indexmap::IndexMap;
 
 mod traefik_config_dynamic;
 
 use super::storage;
 use traefik_config_dynamic::*;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Instance {
     pub(crate) name: String,
     pub(crate) token: String,
@@ -15,77 +16,79 @@ pub struct Instance {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Instances {
-    pub(crate) instances: Vec<Instance>,
-    config_path: String, // Unified Traefik dynamic configuration file path
+    pub(crate) instances: IndexMap<String, Instance>, // Map instance name to Instance
+    token_to_name: HashMap<String, String>,           // Map token to instance name
+    config_path: String,                              // Traefik dynamic configuration file path
 }
 
 impl Instances {
-    // Pass in the configuration path when initializing an instance
+    // Initialize Instances with the configuration path
     pub fn new() -> Self {
         Instances {
-            instances: Vec::new(),
+            instances: IndexMap::new(),
+            token_to_name: HashMap::new(),
             config_path: storage::TRAEFIK_CONFIG.clone(),
         }
     }
 
     pub fn add(&mut self, instance: Instance) -> Result<(), io::Error> {
-        // Check if an instance with the same name already exists
-        if let Some(existing_instance) = self.instances.iter_mut().find(|i| i.name == instance.name) {
-            // Update the token of the existing instance
-            existing_instance.token = instance.token;
-        } else {
-            // Add the new instance if no existing instance with the same name is found
-            self.instances.push(instance);
-        }
+        // Insert or update the instance
+        self.instances.insert(instance.name.clone(), instance.clone());
+        // Update the token_to_name mapping
+        self.token_to_name
+            .insert(instance.token.clone(), instance.name.clone());
         // Save the updated configuration
         self.save_config()
     }
 
-
     pub fn remove(&mut self, instance_token: &str) -> Result<(), io::Error> {
-        self.instances.retain(|i| i.token != instance_token);
+        if let Some(instance_name) = self.token_to_name.remove(instance_token) {
+            self.instances.swap_remove(&instance_name);
+        }
         self.save_config()
     }
 
     fn save_config(&self) -> Result<(), io::Error> {
-        // Save the configuration to the instance-level config_path
+        // Generate and save the Traefik configuration
         let new_config = self.generate_traefik_config();
         fs::write(&self.config_path, new_config)
     }
 
     pub fn shutdown(&mut self) -> Result<(), io::Error> {
-        self.instances = Vec::new(); // Clear instances
-        self.save_config()?; // Attempt to save config, propagate error if it occurs
+        self.instances.clear();      // Clear instances
+        self.token_to_name.clear();  // Clear token mappings
+        self.save_config()?;         // Save the empty configuration
         Ok(())
     }
 
-
     fn generate_traefik_config(&self) -> String {
-        // Generate the content of the Traefik dynamic configuration file based on the current instances
+        // Generate the Traefik dynamic configuration based on current instances
         let mut config = DynamicConfig {
             http: HttpConfig {
-                routers: HashMap::new(), // Add router configurations
-                services: HashMap::new(), // Add service configurations
+                routers: HashMap::new(),   // Use HashMap instead of IndexMap
+                services: HashMap::new(),  // Use HashMap instead of IndexMap
             },
         };
-        for instance in &self.instances {
+
+        for (instance_name, instance) in &self.instances {
             let router = Router {
                 rule: format!("HeaderRegexp(`Cookie`, `auth_token={}`)", instance.token),
-                service: format!("{}-service", instance.name),
+                service: format!("{}-service", instance_name),
                 entryPoints: vec![String::from("web")],
             };
             let service = Service {
                 loadBalancer: LoadBalancer {
                     servers: vec![LoadBalancerServer {
-                        url: format!("http://{}:8080", instance.name),
+                        url: format!("http://{}:8080", instance_name),
                     }],
                     passHostHeader: true,
                 },
             };
-            config.http.services.insert(format!("{}-service", instance.name), service);
-            config.http.routers.insert(format!("{}-router", instance.name), router);
+            config.http.services.insert(format!("{}-service", instance_name), service);
+            config.http.routers.insert(format!("{}-router", instance_name), router);
         }
-        // Serialize to a string and return
+
+        // Serialize to a YAML string and return
         serde_yml::to_string(&config).unwrap_or_else(|_| String::new())
     }
 }

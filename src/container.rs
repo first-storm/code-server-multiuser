@@ -1,22 +1,30 @@
 use std::{
-    collections::HashMap,
     env,
     fs,
     io::{self, ErrorKind},
-    path::Path,
     process::Command,
-    time::SystemTime,
+    sync::Mutex,
+    time::{Duration, SystemTime},
 };
 
 use crate::{
     storage::{DATADIR, DOCKER_IMAGE},
     traefik::{self, Instance},
+    user::User,
 };
-
+use lazy_static::lazy_static;
 use log::{error, info};
 use regex::Regex;
 use serde::Deserialize;
 use users::{get_current_gid, get_current_uid};
+
+lazy_static! {
+    static ref UID: u32 = get_current_uid();
+    static ref GID: u32 = get_current_gid();
+    static ref USERNAME: String = env::var("USER").unwrap_or_else(|_| "default_user".to_string());
+    static ref VERSION_REGEX: Regex = Regex::new(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$").unwrap();
+    static ref CACHE_MUTEX: Mutex<()> = Mutex::new(());
+}
 
 pub struct ContainerManager;
 
@@ -27,7 +35,11 @@ impl ContainerManager {
     }
 
     /// Update an existing Docker container
-    pub fn update_container(uid: &str, token: &str, traefik_instances: &mut traefik::Instances) -> io::Result<()> {
+    pub fn update_container(
+        uid: &str,
+        token: &str,
+        traefik_instances: &mut traefik::Instances,
+    ) -> io::Result<()> {
         let container_id = format!("{}.codeserver", uid);
 
         if Self::is_container_running(uid)? {
@@ -56,23 +68,23 @@ impl ContainerManager {
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
 
-            // Execute command inside the container
-            let exec_command = r#"
-            mkdir -p /home/coder/.local/share/code-server/User/;
-            if [ ! -e /home/coder/.local/share/code-server/extensions ]; then
-                ln -s /home/defaultconfig/.local/share/code-server/extensions /home/coder/.local/share/code-server/extensions;
-            fi;
-            if [ ! -e /home/coder/.local/share/code-server/User/settings.json ]; then
-                cp /home/defaultconfig/.local/share/code-server/User/settings.json /home/coder/.local/share/code-server/User/settings.json;
-            fi
-        "#.to_string();
+            // Execute commands inside the container
+            let exec_commands = r#"
+                mkdir -p /home/coder/.local/share/code-server/User/;
+                if [ ! -e /home/coder/.local/share/code-server/extensions ]; then
+                    ln -s /home/defaultconfig/.local/share/code-server/extensions /home/coder/.local/share/code-server/extensions;
+                fi;
+                if [ ! -e /home/coder/.local/share/code-server/User/settings.json ]; then
+                    cp /home/defaultconfig/.local/share/code-server/User/settings.json /home/coder/.local/share/code-server/User/settings.json;
+                fi
+            "#;
 
             let exec_output = Command::new("docker")
                 .arg("exec")
                 .arg(container_id)
                 .arg("sh")
                 .arg("-c")
-                .arg(&exec_command)
+                .arg(exec_commands)
                 .output()?;
 
             if exec_output.status.success() {
@@ -80,9 +92,9 @@ impl ContainerManager {
             } else {
                 let exec_error = String::from_utf8_lossy(&exec_output.stderr);
                 error!(
-                "Failed to execute command inside container: {}. Error: {}",
-                container_id, exec_error
-            );
+                    "Failed to execute command inside container: {}. Error: {}",
+                    container_id, exec_error
+                );
                 return Err(io::Error::new(ErrorKind::Other, exec_error.to_string()));
             }
 
@@ -90,7 +102,7 @@ impl ContainerManager {
                 name: container_id.to_string(),
                 token: token.to_string(),
             }) {
-                let error_message = format!("Failed to add traefik instance: {}", e);
+                let error_message = format!("Failed to add Traefik instance: {}", e);
                 error!("{}", error_message);
                 return Err(io::Error::new(ErrorKind::Other, error_message));
             }
@@ -118,7 +130,7 @@ impl ContainerManager {
             info!("Successfully stopped container: {}", container_id);
             if let Err(e) = traefik_instances.remove(container_id) {
                 error!(
-                    "Failed to remove traefik instance for container {}: {}",
+                    "Failed to remove Traefik instance for container {}: {}",
                     container_id, e
                 );
             }
@@ -137,7 +149,12 @@ impl ContainerManager {
     /// Check if a container is running
     pub fn is_container_running(uid: &str) -> io::Result<bool> {
         let container_id = format!("{}.codeserver", uid);
-        let output = Command::new("docker").arg("inspect").arg("--format").arg("{{.State.Running}}").arg(&container_id).output()?;
+        let output = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{.State.Running}}")
+            .arg(&container_id)
+            .output()?;
 
         if output.status.success() {
             let is_running = String::from_utf8_lossy(&output.stdout).trim() == "true";
@@ -153,7 +170,7 @@ impl ContainerManager {
 
     /// Check and stop expired containers
     pub fn check_expiration(
-        users: &mut Vec<crate::user::User>,
+        users: &mut [&mut User],
         traefik_instances: &mut traefik::Instances,
     ) {
         for user in users.iter_mut() {
@@ -162,53 +179,39 @@ impl ContainerManager {
                 *DATADIR, user.uid
             );
 
-            let duration = fs::metadata(&heartbeat_path).and_then(|metadata| metadata.modified()).and_then(|modified_time| {
-                SystemTime::now().duration_since(modified_time).map_err(|e| io::Error::new(ErrorKind::Other, e))
-            });
-
-            let is_expired = match duration {
+            match fs::metadata(&heartbeat_path)
+                .and_then(|metadata| metadata.modified())
+                .and_then(|modified_time| {
+                    SystemTime::now()
+                        .duration_since(modified_time)
+                        .map_err(|e| io::Error::new(ErrorKind::Other, e))
+                }) {
+                Ok(duration) if duration.as_secs() >= 1200 => {
+                    if let Err(e) = Self::logout_user(user, traefik_instances) {
+                        error!("Failed to log out user '{}': {}", user.username, e);
+                    } else {
+                        info!(
+                            "User '{}' has been idled for {} seconds and logged out.",
+                            user.username, duration.as_secs()
+                        );
+                    }
+                }
                 Ok(duration) => {
-                    duration.as_secs() >= 1200
+                    info!(
+                        "User '{}' has been idled for {} seconds.",
+                        user.username, duration.as_secs()
+                    );
                 }
-                Err(..) => {
-                    false
+                Err(e) => {
+                    error!("Failed to check user status '{}': {}", user.username, e);
                 }
-            };
-
-            if is_expired && user.token != None {
-                match duration {
-                    Ok(duration) => {
-                        if user.token != None {
-                            info!("User '{}' has been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
-                        } else {
-                            info!("User '{}' hasn't been logged in.", user.username);
-                        }
-                    }
-                    Err(..) => {
-                        error!("Failed to check user status '{}'", user.username);
-                    }
-                };
-                if let Err(e) = Self::logout_user(user, traefik_instances) {
-                    error!("Failed to log out user '{}': {}", user.username, e);
-                } else {
-                    info!("Successfully logged out user '{}'", user.username);
-                }
-            } else {
-                match duration {
-                    Ok(duration) => {
-                        info!("User '{}' hasn't been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
-                    }
-                    Err(..) => {
-                        error!("Failed to check user status '{}'", user.username);
-                    }
-                };
             }
         }
     }
 
     /// Log out a user
     pub fn logout_user(
-        user: &mut crate::user::User,
+        user: &mut User,
         traefik_instances: &mut traefik::Instances,
     ) -> io::Result<()> {
         let container_id = format!("{}.codeserver", user.uid);
@@ -227,7 +230,7 @@ impl ContainerManager {
 
     /// Log out all users
     pub fn logout_all_users(
-        users: &mut Vec<crate::user::User>,
+        users: &mut [&mut User],
         traefik_instances: &mut traefik::Instances,
     ) -> io::Result<()> {
         for user in users.iter_mut() {
@@ -242,58 +245,25 @@ impl ContainerManager {
 
     /// Private function to build Docker create command
     fn build_docker_create_command(uid: &str) -> io::Result<Command> {
-        let user = env::var("USER").map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+        let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), Self::get_latest_image_tag()?);
 
-        // Get the numeric UID and GID without spawning a process
-        let uid_num = get_current_uid();
-        let gid_num = get_current_gid();
-        let uid_str = uid_num.to_string();
-        let gid_str = gid_num.to_string();
-
-        // Get the latest image tag
-        let latest_tag = Self::get_latest_image_tag()?;
-        let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), latest_tag);
-
-        // Build Docker create command
         let mut command = Command::new("docker");
-        command.arg("create")
+        command
+            .arg("create")
             .arg("--name")
             .arg(format!("{}.codeserver", uid))
-            // .arg("-v")
-            // .arg(format!(
-            //     "{}/{}.data/.local:/home/coder/.local",
-            //     DATADIR.as_str(),
-            //     uid
-            // ))
-            // .arg("-v")
-            // .arg(format!(
-            //     "{}/{}.data/.config:/home/coder/.config",
-            //     DATADIR.as_str(),
-            //     uid
-            // ))
-            // .arg("-v")
-            // .arg(format!(
-            //     "{}/{}.data/project:{}",
-            //     DATADIR.as_str(),
-            //     uid,
-            //     "/home/coder/projects"
-            // ))
-            // 
             .arg("-v")
-            .arg(format!(
-                "/mnt/code-data/{}.data/home:/home/coder",
-                uid
-            ))
+            .arg(format!("/mnt/code-data/{}.data/home:/home/coder", uid))
             .arg("-u")
-            .arg(format!("{}:{}", uid_str, gid_str))
+            .arg(format!("{}:{}", *UID, *GID))
             .arg("-e")
-            .arg(format!("DOCKER_USER={}", user))
-            // .arg("-e")
-            // .arg(format!("PASSWORD={}", password))
+            .arg(format!("DOCKER_USER={}", *USERNAME))
             .arg("-e")
-            .arg(r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#)
+            .arg(
+                r#"EXTENSIONS_GALLERY={"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery"}"#,
+            )
             .arg("-e")
-            .arg("XDG_DATA_HOME=/home/coder/.local/share") // Added environment variable
+            .arg("XDG_DATA_HOME=/home/coder/.local/share")
             .arg("--storage-opt")
             .arg("size=1G")
             .arg("--network")
@@ -354,7 +324,10 @@ impl ContainerManager {
         let latest_tag = Self::get_latest_image_tag()?;
         let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), latest_tag);
 
-        let output = Command::new("docker").arg("pull").arg(&image_with_tag).output()?;
+        let output = Command::new("docker")
+            .arg("pull")
+            .arg(&image_with_tag)
+            .output()?;
 
         if output.status.success() {
             info!("Successfully pulled the latest image '{}'", image_with_tag);
@@ -374,10 +347,17 @@ impl ContainerManager {
 
     /// Get the tag of a container given its ID
     pub fn get_container_tag(container_id: &str) -> io::Result<String> {
-        let output = Command::new("docker").arg("inspect").arg("--format").arg("{{.Config.Image}}").arg(container_id).output()?;
+        let output = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{.Config.Image}}")
+            .arg(container_id)
+            .output()?;
 
         if output.status.success() {
-            let image_full_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let image_full_name = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_string();
             // Extract the tag part
             if let Some(tag) = image_full_name.split(':').nth(1) {
                 Ok(tag.to_string())
@@ -397,16 +377,18 @@ impl ContainerManager {
     /// Get the latest tag version of the image, with a one-hour cache
     pub fn get_latest_image_tag() -> io::Result<String> {
         let cache_file = "/tmp/docker_image_latest_tag.cache";
+        let _cache_lock = CACHE_MUTEX.lock().unwrap();
 
         // Check if the cache file exists and is within one hour
-        if Path::new(cache_file).exists() {
-            let metadata = fs::metadata(cache_file)?;
-            let modified_time = metadata.modified()?;
-            if let Ok(duration) = SystemTime::now().duration_since(modified_time) {
-                if duration.as_secs() < 3600 {
-                    // Cache is valid
-                    let cached_tag = fs::read_to_string(cache_file)?;
-                    return Ok(cached_tag.trim().to_string());
+        if let Ok(metadata) = fs::metadata(cache_file) {
+            if let Ok(modified_time) = metadata.modified() {
+                if let Ok(duration) = SystemTime::now().duration_since(modified_time) {
+                    if duration < Duration::from_secs(3600) {
+                        // Cache is valid
+                        if let Ok(cached_tag) = fs::read_to_string(cache_file) {
+                            return Ok(cached_tag.trim().to_string());
+                        }
+                    }
                 }
             }
         }
@@ -423,6 +405,7 @@ impl ContainerManager {
         let registry = parts[0];
         let user = parts[1];
         let image = parts[2];
+
         if registry != "ghcr.io" {
             return Err(io::Error::new(
                 ErrorKind::Other,
@@ -445,6 +428,7 @@ impl ContainerManager {
         let token_resp: TokenResponse = client
             .get(&token_url)
             .send()
+            .and_then(|resp| resp.error_for_status())
             .map_err(|e| io::Error::new(ErrorKind::Other, e))?
             .json()
             .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
@@ -461,32 +445,29 @@ impl ContainerManager {
             .get(&tags_url)
             .header("Authorization", format!("Bearer {}", token_resp.token))
             .send()
+            .and_then(|resp| resp.error_for_status())
             .map_err(|e| io::Error::new(ErrorKind::Other, e))?
             .json()
             .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
-        // Iterate over tags and extract versions
-        fn extract_version(tag: &str) -> Option<(u64, u64, u64, u64)> {
-            let re = Regex::new(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$").unwrap();
-            if let Some(caps) = re.captures(tag) {
-                let a = caps.get(1)?.as_str().parse::<u64>().ok()?;
-                let b = caps.get(2)?.as_str().parse::<u64>().ok()?;
-                let c = caps.get(3)?.as_str().parse::<u64>().ok()?;
-                let d = caps.get(4)?.as_str().parse::<u64>().ok()?;
-                Some((a, b, c, d))
-            } else {
-                None
-            }
-        }
-
         // Collect all valid versions and corresponding tags
-        let mut version_tags: HashMap<(u64, u64, u64, u64), String> = HashMap::new();
-
-        for tag in tags_resp.tags {
-            if let Some(version) = extract_version(&tag) {
-                version_tags.insert(version, tag);
-            }
-        }
+        let mut version_tags: Vec<((u64, u64, u64, u64), String)> = tags_resp
+            .tags
+            .into_iter()
+            .filter_map(|tag| {
+                VERSION_REGEX.captures(&tag).and_then(|caps| {
+                    Some((
+                        (
+                            caps.get(1)?.as_str().parse().ok()?,
+                            caps.get(2)?.as_str().parse().ok()?,
+                            caps.get(3)?.as_str().parse().ok()?,
+                            caps.get(4)?.as_str().parse().ok()?,
+                        ),
+                        tag.to_string()
+                    ))
+                })
+            })
+            .collect();
 
         if version_tags.is_empty() {
             return Err(io::Error::new(
@@ -496,8 +477,8 @@ impl ContainerManager {
         }
 
         // Find the highest version
-        let latest_version = version_tags.keys().max().unwrap();
-        let latest_tag = version_tags.get(latest_version).unwrap().clone();
+        version_tags.sort_by(|a, b| b.0.cmp(&a.0));
+        let latest_tag = version_tags.first().unwrap().1.clone();
 
         // Cache the latest tag
         fs::write(cache_file, &latest_tag)?;
