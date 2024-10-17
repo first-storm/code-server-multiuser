@@ -487,6 +487,7 @@ impl ContainerManager {
     }
 
     /// Check if a container is using the latest version
+    #[allow(dead_code)]
     pub fn is_container_latest_version(container_id: &str) -> io::Result<bool> {
         let container_tag = Self::get_container_tag(container_id)?;
         let latest_tag = Self::get_latest_image_tag()?;

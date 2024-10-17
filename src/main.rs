@@ -593,6 +593,8 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
         Ok(()) => info!("Traefik instances have been successfully shut down."),
         Err(e) => error!("Error shutting down Traefik instances: {}", e),
     }
+    
+    db.write_to_file_immediately();
 
     drop(db);
 

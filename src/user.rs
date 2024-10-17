@@ -278,6 +278,24 @@ impl UserDB {
         }
         Ok(())
     }
+    pub fn write_to_file_immediately(&mut self) {
+        // Force write to file on drop
+        let now = Instant::now();
+        match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
+            Ok(file) => {
+                let writer = BufWriter::new(file);
+                if let Err(e) = serde_json::to_writer_pretty(writer, &self) {
+                    error!("Failed to write user database immediately: {}", e);
+                } else {
+                    info!("User database written to file immediately: {}", self.file_path);
+                    self.last_write_time = Some(now);
+                }
+            },
+            Err(e) => {
+                error!("Failed to open file for writing immediately: {}", e);
+            }
+        }
+    }
 
     /// Reads the user database from a file and returns a `UserDB` instance.
     pub fn read_from_file(file_path: &str) -> Result<UserDB, Box<dyn Error>> {
@@ -303,7 +321,8 @@ impl UserDB {
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
         self.users.values().find(|user| user.token.as_deref() == Some(token))
     }
-
+    
+    #[allow(dead_code)]
     pub fn find_user_by_token_mut(&mut self, token: &str) -> Option<&mut User> {
         self.users.values_mut().find(|user| user.token.as_deref() == Some(token))
     }
