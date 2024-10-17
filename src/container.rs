@@ -175,11 +175,15 @@ impl ContainerManager {
                 }
             };
 
-            if is_expired {
-                info!(
-                    "User '{}' has been idle for too long. Logging out.",
-                    user.username
-                );
+            if is_expired&& user.token!=None {
+                match duration {
+                    Ok(duration) => {
+                        info!("User '{}' has been expired. He has been idled for {} seconds.", user.username, duration.as_secs());
+                    }
+                    Err(..) => {
+                        error!("Failed to check user status '{}'", user.username);
+                    }
+                };
                 if let Err(e) = Self::logout_user(user, traefik_instances) {
                     error!("Failed to log out user '{}': {}", user.username, e);
                 } else {
