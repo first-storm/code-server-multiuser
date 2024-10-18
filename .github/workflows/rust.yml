@@ -35,7 +35,9 @@ jobs:
         # Exclude temporary files
         if-no-files-found: error
         exclude: |
-          target/debug/build/**
+          target/release/build/**
+          target/release/deps/**
+          target/release/incremental/**
 
     - name: Upload Release Artifact
       uses: actions/upload-artifact@v3
@@ -47,4 +49,6 @@ jobs:
         if-no-files-found: error
         exclude: |
           target/release/build/**
+          target/release/deps/**
+          target/release/incremental/**
 
