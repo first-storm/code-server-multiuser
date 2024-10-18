@@ -497,11 +497,13 @@ async fn expiration_checker(db: SharedUserDB) {
 // Periodically save userdb
 async fn db_saver(db: SharedUserDB) {
     loop {
-        // Lock the database and save the database
-        let mut db_write = db.write().await;
-        match db_write.write_to_file() {
-            Ok(_) => info!("The user database saved successfully"),
-            Err(e) => error!("Error writing database to file periodically: {}", e),
+        {
+            // Lock the database and save the database
+            let mut db_write = db.write().await;
+            match db_write.write_to_file() {
+                Ok(_) => info!("The user database saved successfully"),
+                Err(e) => error!("Error writing database to file periodically: {}", e),
+            }
         }
         info!("The database has been saved.");
         sleep(Duration::from_secs(*storage::SAVE_INTERVAL)).await; // Sleep for 60 seconds before re-checking
@@ -535,7 +537,7 @@ async fn main() -> io::Result<()> {
 
     // Spawn a background task for container expiration checking
     tokio::spawn(expiration_checker(shared_database.clone()));
-    
+
     // Spawn a background task for saving database.
     tokio::spawn(db_saver(shared_database.clone()));
 
