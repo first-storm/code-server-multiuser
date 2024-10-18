@@ -505,8 +505,7 @@ async fn db_saver(db: SharedUserDB) {
                 Err(e) => error!("Error writing database to file periodically: {}", e),
             }
         }
-        info!("The database has been saved.");
-        sleep(Duration::from_secs(*storage::SAVE_INTERVAL)).await; // Sleep for 60 seconds before re-checking
+        sleep(Duration::from_secs(*storage::SAVE_INTERVAL)).await;
     }
 }
 
@@ -572,7 +571,7 @@ async fn main() -> io::Result<()> {
         info!("Server is shutting down.");
         exit(0);  // Exit after completing the shutdown
     });
-
+    
     // Start the HTTP server and share the database
     let srv = HttpServer::new(move || {
         App::new()

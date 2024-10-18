@@ -57,7 +57,7 @@ impl Error for LoginError {}
 impl UserDB {
     /// Generates a unique token for user authentication.
     fn generate_unique_token() -> String {
-        Uuid::new_v4().to_string()
+        Uuid::now_v7().to_string()
     }
 
     /// Creates a new `UserDB` instance with the given file path and writes the empty database to the file.
