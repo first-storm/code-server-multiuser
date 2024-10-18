@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-use std::time::SystemTime;
 use std::{fmt, io};
 use uuid::Uuid;
 
@@ -31,9 +30,9 @@ pub struct UserDB {
     username_to_uid: HashMap<String, isize>,
     #[serde(skip)]
     email_to_uid: HashMap<String, isize>,
+    #[serde(skip)]
+    token_to_uid: HashMap<String, isize>,
     file_path: String,
-    // #[serde(skip)]
-    // last_write_time: Option<Instant>, // Add this field
 }
 
 #[derive(Debug)]
@@ -69,8 +68,8 @@ impl UserDB {
             users: HashMap::new(),
             username_to_uid: HashMap::new(),
             email_to_uid: HashMap::new(),
+            token_to_uid: HashMap::new(),
             file_path: file_path.to_string(),
-            // last_write_time: None, // Initialize last_write_time
         };
         if let Err(e) = udb.write_to_file() {
             error!(
@@ -103,21 +102,30 @@ impl UserDB {
 
         // Add user to the users HashMap and update mappings
         let uid = user.uid;
-        self.users.insert(uid, user.clone());
-        self.username_to_uid.insert(user.username.clone(), uid);
-        self.email_to_uid.insert(user.email.clone(), uid);
+        let username = user.username.clone();
+        let email = user.email.clone();
+        self.users.insert(uid, user);
+        self.username_to_uid.insert(username, uid);
+        self.email_to_uid.insert(email, uid);
         Ok(())
     }
 
     fn update_file_mtime(file_path: &str) -> io::Result<()> {
-        // Get current time
-        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
-        let mtime = FileTime::from_unix_time(now.as_secs() as i64, now.subsec_nanos());
-
-        // Set file mtime
+        let mtime = FileTime::now();
         set_file_mtime(file_path, mtime)?;
-
         Ok(())
+    }
+
+    fn refresh_heartbeat(uid: isize) {
+        match Self::update_file_mtime(&format!(
+            "{}/{}.data/home/.local/share/code-server/heartbeat",
+            *crate::storage::DATADIR, uid
+        )) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Failed to update heartbeat file: {}", e);
+            }
+        }
     }
 
     pub fn login(&mut self, username: &str, password: &str) -> Result<String, LoginError> {
@@ -140,57 +148,45 @@ impl UserDB {
         // Generate a unique token
         let token = UserDB::generate_unique_token();
         user.token = Some(token.clone());
+        self.token_to_uid.insert(token.clone(), *uid); // Update the token map
+        
         let uid = *uid;
 
-        let refresh_heartbeat = || {
-            // Update heartbeat file
-            match Self::update_file_mtime(&format!(
-                "{}/{}.data/home/.local/share/code-server/heartbeat",
-                *crate::storage::DATADIR, uid
-            )) {
-                Ok(_) => (),
-                Err(e) => {
-                    error!("Failed to update heartbeat file: {}", e);
-                }
-            }
-        };
-
-        // Proceed with other operations
-        match ContainerManager::is_container_running(&uid.to_string()) {
-            Ok(true) => {
-                // Update heartbeat file
-                refresh_heartbeat();
-                info!("Container is already running for user: {}", username);
-
-                // Ensure to add a Traefik instance even if the container is running
-                self.traefik_instances.add(Instance {
-                    name: format!("{}.codeserver", uid),
-                    token: token.clone(),
-                }).map_err(|e| {
-                    let error_message = format!("Failed to add traefik instance: {}", e);
-                    error!("{}", error_message);
-                    LoginError::ContainerError(error_message)
-                })?;
-            }
-            Ok(false) => {
-                // Update heartbeat file
-                refresh_heartbeat();
-                // If the container is not running, start the container
-                info!("Starting container for user: {}", username);
-                ContainerManager::start_container(
-                    &format!("{}.codeserver", uid),
-                    &token,
-                    &mut self.traefik_instances,
-                ).map_err(|e| {
-                    error!("Failed to start container for user {}: {}", username, e);
-                    LoginError::ContainerError(e.to_string())
-                })?;
-                info!("Successfully started container for user: {}", username);
-            }
+        let is_running = match ContainerManager::is_container_running(&uid.to_string()) {
+            Ok(is_running) => is_running,
             Err(e) => {
                 error!("Failed to check container status for user {}: {}", username, e);
                 return Err(LoginError::ContainerError(e.to_string()));
             }
+        };
+
+        // Update heartbeat file
+        Self::refresh_heartbeat(uid);
+
+        if is_running {
+            info!("Container is already running for user: {}", username);
+
+            // Ensure to add a Traefik instance even if the container is running
+            self.traefik_instances.add(Instance {
+                name: format!("{}.codeserver", uid),
+                token: token.clone(),
+            }).map_err(|e| {
+                let error_message = format!("Failed to add traefik instance: {}", e);
+                error!("{}", error_message);
+                LoginError::ContainerError(error_message)
+            })?;
+        } else {
+            // If the container is not running, start the container
+            info!("Starting container for user: {}", username);
+            ContainerManager::start_container(
+                &format!("{}.codeserver", uid),
+                &token,
+                &mut self.traefik_instances,
+            ).map_err(|e| {
+                error!("Failed to start container for user {}: {}", username, e);
+                LoginError::ContainerError(e.to_string())
+            })?;
+            info!("Successfully started container for user: {}", username);
         }
 
         info!("Login successful for user: {}", username);
@@ -198,29 +194,29 @@ impl UserDB {
     }
 
     pub fn logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
-        // Find the user mutably
         if let Some(user) = self.users.get_mut(&uid) {
-            // Logout the user
             ContainerManager::logout_user(user, &mut self.traefik_instances)?;
-            info!("User '{}' logged out successfully", user.username);
-            // Clear the user's token
+            if let Some(token) = &user.token {
+                self.token_to_uid.remove(token); // Remove the token from the map
+            }
             user.token = None;
+            info!("User '{}' logged out successfully", user.username);
         } else {
             error!("User with UID {} not found for logout", uid);
             return Err(Box::new(LoginError::UserNotFound));
         }
-
         Ok(())
     }
 
+
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        ContainerManager::check_expiration(&mut self.users.values_mut().collect::<Vec<_>>(), &mut self.traefik_instances);
+        ContainerManager::check_expiration(self.users.values_mut(), &mut self.traefik_instances);
     }
 
     /// Logs out all users by stopping their containers and clearing their tokens.
     pub fn logout_all_users(&mut self) -> Result<(), Box<dyn Error>> {
-        ContainerManager::logout_all_users(&mut self.users.values_mut().collect::<Vec<_>>(), &mut self.traefik_instances)?;
+        ContainerManager::logout_all_users(self.users.values_mut(), &mut self.traefik_instances)?;
 
         // Clear tokens for all users
         for user in self.users.values_mut() {
@@ -273,12 +269,11 @@ impl UserDB {
         let reader = BufReader::new(file);
         let mut userdb: UserDB = serde_json::from_reader(reader)?;
         userdb.file_path = file_path.to_string();
-        // userdb.last_write_time = Some(Instant::now()); // Initialize last_write_time
         info!("User database loaded from file: {}", file_path);
 
         // Rebuild username_to_uid and email_to_uid mappings
-        userdb.username_to_uid = HashMap::new();
-        userdb.email_to_uid = HashMap::new();
+        userdb.username_to_uid = HashMap::with_capacity(userdb.users.len());
+        userdb.email_to_uid = HashMap::with_capacity(userdb.users.len());
         for (uid, user) in &userdb.users {
             userdb.username_to_uid.insert(user.username.clone(), *uid);
             userdb.email_to_uid.insert(user.email.clone(), *uid);
@@ -289,13 +284,18 @@ impl UserDB {
 
     /// Finds a user by their token.
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
-        self.users.values().find(|user| user.token.as_deref() == Some(token))
+        self.token_to_uid
+            .get(token)
+            .and_then(|uid| self.users.get(uid))
     }
 
     #[allow(dead_code)]
     pub fn find_user_by_token_mut(&mut self, token: &str) -> Option<&mut User> {
-        self.users.values_mut().find(|user| user.token.as_deref() == Some(token))
+        self.token_to_uid
+            .get(token)
+            .and_then(|uid| self.users.get_mut(uid))
     }
+
 
     /// Finds a user by their UID.
     #[allow(dead_code)]
@@ -330,18 +330,9 @@ impl UserDB {
 impl Drop for UserDB {
     fn drop(&mut self) {
         // Force write to file on drop
-        match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
-            Ok(file) => {
-                let writer = BufWriter::new(file);
-                if let Err(e) = serde_json::to_writer_pretty(writer, &self) {
-                    error!("Failed to write user database on drop: {}", e);
-                } else {
-                    info!("User database written to file on drop: {}", self.file_path);
-                }
-            }
-            Err(e) => {
-                error!("Failed to open file for writing on drop: {}", e);
-            }
+        match self.write_to_file() {
+            Ok(_) => info!("User database written to file on drop: {}", self.file_path),
+            Err(e) => error!("Failed to write user database on drop: {}", e),
         }
     }
 }

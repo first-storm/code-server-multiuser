@@ -169,11 +169,11 @@ impl ContainerManager {
     }
 
     /// Check and stop expired containers
-    pub fn check_expiration(
-        users: &mut [&mut User],
+    pub fn check_expiration<'a>(
+        users: impl Iterator<Item = &'a mut User>,
         traefik_instances: &mut traefik::Instances,
     ) {
-        for user in users.iter_mut() {
+        for user in users {
             let heartbeat_path = format!(
                 "{}/{}.data/home/.local/share/code-server/heartbeat",
                 *DATADIR, user.uid
@@ -191,16 +191,16 @@ impl ContainerManager {
                         error!("Failed to log out user '{}': {}", user.username, e);
                     } else {
                         info!(
-                            "User '{}' has been idled for {} seconds and logged out.",
-                            user.username, duration.as_secs()
-                        );
+                        "User '{}' has been idled for {} seconds and logged out.",
+                        user.username, duration.as_secs()
+                    );
                     }
                 }
                 Ok(duration) => {
                     info!(
-                        "User '{}' has been idled for {} seconds.",
-                        user.username, duration.as_secs()
-                    );
+                    "User '{}' has been idled for {} seconds.",
+                    user.username, duration.as_secs()
+                );
                 }
                 Err(e) => {
                     error!("Failed to check user status '{}': {}", user.username, e);
@@ -229,11 +229,11 @@ impl ContainerManager {
     }
 
     /// Log out all users
-    pub fn logout_all_users(
-        users: &mut [&mut User],
+    pub fn logout_all_users<'a>(
+        users: impl Iterator<Item = &'a mut User>,
         traefik_instances: &mut traefik::Instances,
     ) -> io::Result<()> {
-        for user in users.iter_mut() {
+        for user in users {
             if let Err(e) = Self::logout_user(user, traefik_instances) {
                 error!("Failed to log out user '{}': {}", user.username, e);
             } else {
