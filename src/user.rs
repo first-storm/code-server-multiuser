@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-use std::{fmt, fs, io};
 use std::time::SystemTime;
+use std::{fmt, fs, io};
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -216,7 +216,7 @@ impl UserDB {
         }
         Ok(())
     }
-    
+
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
         let mut users_to_logout = Vec::new();
