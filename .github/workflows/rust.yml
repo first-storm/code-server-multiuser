@@ -16,8 +16,25 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
+
+    - name: Build Debug
       run: cargo build --verbose
+
+    - name: Build Release
+      run: cargo build --release --verbose
+
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Upload Debug Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: debug-build
+        path: target/debug/
+
+    - name: Upload Release Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: release-build
+        path: target/release/
 
