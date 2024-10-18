@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-use std::{fmt, io};
+use std::{fmt, fs, io};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -58,6 +59,16 @@ impl UserDB {
     /// Generates a unique token for user authentication.
     fn generate_unique_token() -> String {
         Uuid::now_v7().to_string()
+    }
+
+    /// Clears the token for a user and updates the token_to_uid map
+    pub fn clear_user_token(&mut self, uid: isize) {
+        if let Some(user) = self.users.get_mut(&uid) {
+            if let Some(token) = &user.token {
+                self.token_to_uid.remove(token);
+            }
+            user.token = None;
+        }
     }
 
     /// Creates a new `UserDB` instance with the given file path and writes the empty database to the file.
@@ -196,31 +207,63 @@ impl UserDB {
     pub fn logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
         if let Some(user) = self.users.get_mut(&uid) {
             ContainerManager::logout_user(user, &mut self.traefik_instances)?;
-            if let Some(token) = &user.token {
-                self.token_to_uid.remove(token); // Remove the token from the map
-            }
-            user.token = None;
-            info!("User '{}' logged out successfully", user.username);
+            let username = user.username.clone();
+            self.clear_user_token(uid); // Clear the user's token
+            info!("User '{}' logged out successfully", username);
         } else {
             error!("User with UID {} not found for logout", uid);
             return Err(Box::new(LoginError::UserNotFound));
         }
         Ok(())
     }
-
-
+    
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        ContainerManager::check_expiration(self.users.values_mut(), &mut self.traefik_instances);
+        let mut user_clone = self.users.clone();
+        for user in user_clone.values_mut() {
+            let heartbeat_path = format!(
+                "{}/{}.data/home/.local/share/code-server/heartbeat",
+                *crate::storage::DATADIR, user.uid
+            );
+
+            match fs::metadata(&heartbeat_path)
+                .and_then(|metadata| metadata.modified())
+                .and_then(|modified_time| {
+                    SystemTime::now()
+                        .duration_since(modified_time)
+                        .map_err(|e| io::Error::new(ErrorKind::Other, e))
+                }) {
+                Ok(duration) if duration.as_secs() >= 1200 => {
+                    // If the user has been idle for more than 1200 seconds
+                    if let Err(e) = self.logout(user.uid) {
+                        error!("Failed to log out user '{}': {}", user.username, e);
+                    } else {
+                        info!(
+                            "User '{}' has been idle for {} seconds and logged out.",
+                            user.username, duration.as_secs()
+                        );
+                    }
+                }
+                Ok(duration) => {
+                    info!(
+                        "User '{}' has been idle for {} seconds.",
+                        user.username, duration.as_secs()
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to check user status '{}': {}", user.username, e);
+                }
+            }
+        }
     }
 
     /// Logs out all users by stopping their containers and clearing their tokens.
     pub fn logout_all_users(&mut self) -> Result<(), Box<dyn Error>> {
         ContainerManager::logout_all_users(self.users.values_mut(), &mut self.traefik_instances)?;
 
-        // Clear tokens for all users
-        for user in self.users.values_mut() {
-            user.token = None;
+        // Clear tokens for all users using the new method
+        for uid in self.users.keys().cloned().collect::<Vec<_>>() {
+            self.clear_user_token(uid);
         }
 
         Ok(())

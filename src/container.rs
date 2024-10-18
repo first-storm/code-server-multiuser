@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    storage::{DATADIR, DOCKER_IMAGE},
+    storage::DOCKER_IMAGE,
     traefik::{self, Instance},
     user::User,
 };
@@ -168,47 +168,6 @@ impl ContainerManager {
         }
     }
 
-    /// Check and stop expired containers
-    pub fn check_expiration<'a>(
-        users: impl Iterator<Item = &'a mut User>,
-        traefik_instances: &mut traefik::Instances,
-    ) {
-        for user in users {
-            let heartbeat_path = format!(
-                "{}/{}.data/home/.local/share/code-server/heartbeat",
-                *DATADIR, user.uid
-            );
-
-            match fs::metadata(&heartbeat_path)
-                .and_then(|metadata| metadata.modified())
-                .and_then(|modified_time| {
-                    SystemTime::now()
-                        .duration_since(modified_time)
-                        .map_err(|e| io::Error::new(ErrorKind::Other, e))
-                }) {
-                Ok(duration) if duration.as_secs() >= 1200 => {
-                    if let Err(e) = Self::logout_user(user, traefik_instances) {
-                        error!("Failed to log out user '{}': {}", user.username, e);
-                    } else {
-                        info!(
-                        "User '{}' has been idled for {} seconds and logged out.",
-                        user.username, duration.as_secs()
-                    );
-                    }
-                }
-                Ok(duration) => {
-                    info!(
-                    "User '{}' has been idled for {} seconds.",
-                    user.username, duration.as_secs()
-                );
-                }
-                Err(e) => {
-                    error!("Failed to check user status '{}': {}", user.username, e);
-                }
-            }
-        }
-    }
-
     /// Log out a user
     pub fn logout_user(
         user: &mut User,
@@ -221,9 +180,8 @@ impl ContainerManager {
             Self::stop_container(&container_id, traefik_instances)?;
         }
 
-        // Clear the user's token
-        user.token = None;
-        info!("Cleared token for user: {}", user.username);
+        // No longer clear the user's token here
+        info!("Container stopped for user: {}", user.username);
 
         Ok(())
     }
