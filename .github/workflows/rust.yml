@@ -30,11 +30,21 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: debug-build
-        path: target/debug/
+        path: |
+          target/debug/**
+        # Exclude temporary files
+        if-no-files-found: error
+        exclude: |
+          target/debug/build/**
 
     - name: Upload Release Artifact
       uses: actions/upload-artifact@v3
       with:
         name: release-build
-        path: target/release/
+        path: |
+          target/release/**
+        # Exclude temporary files
+        if-no-files-found: error
+        exclude: |
+          target/release/build/**
 
