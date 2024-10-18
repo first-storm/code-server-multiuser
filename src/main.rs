@@ -3,12 +3,12 @@ mod storage;
 mod traefik;
 mod container;
 
-use std::{fs, fs::File, io::{self, BufRead}, process::exit, sync::Arc, time::Duration};
-use std::path::Path;
 use actix_web::{
     cookie::{self, CookieBuilder},
     web, App, HttpResponse, HttpServer, Result as ActixResult,
 };
+use std::path::Path;
+use std::{fs, fs::File, io::{self, BufRead}, process::exit, sync::Arc, time::Duration};
 
 use crate::{
     container::ContainerManager,
@@ -262,7 +262,7 @@ async fn logout(db: web::Data<SharedUserDB>, req: actix_web::HttpRequest) -> Res
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        }
+        };
     }
 
     // If no auth_token is found, redirect to the login page
@@ -355,7 +355,7 @@ async fn update_container(
             // If the user is not found, redirect to the dashboard
             info!("User not found, redirecting to dashboard.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).finish())
-        }
+        };
     }
 
     info!("Redirect to dashboard.");
@@ -446,7 +446,7 @@ async fn dashboard(
             // If the token is invalid, redirect to the login page
             warn!("Invalid token, redirecting to login page.");
             Ok(HttpResponse::Found().append_header(("LOCATION", "/login")).finish())
-        }
+        };
     }
 
     // If no auth_token is found, redirect to the login page
@@ -494,6 +494,20 @@ async fn expiration_checker(db: SharedUserDB) {
     }
 }
 
+// Periodically save userdb
+async fn db_saver(db: SharedUserDB) {
+    loop {
+        // Lock the database and save the database
+        let mut db_write = db.write().await;
+        match db_write.write_to_file() {
+            Ok(_) => info!("The user database saved successfully"),
+            Err(e) => error!("Error writing database to file periodically: {}", e),
+        }
+        info!("The database has been saved.");
+        sleep(Duration::from_secs(*storage::SAVE_INTERVAL)).await; // Sleep for 60 seconds before re-checking
+    }
+}
+
 #[actix_web::main]
 async fn main() -> io::Result<()> {
     env_logger::init();
@@ -521,6 +535,9 @@ async fn main() -> io::Result<()> {
 
     // Spawn a background task for container expiration checking
     tokio::spawn(expiration_checker(shared_database.clone()));
+    
+    // Spawn a background task for saving database.
+    tokio::spawn(db_saver(shared_database.clone()));
 
     // Handle the server shutdown signal
     let shared_db_clone = shared_database.clone(); // Clone shared database for shutdown handler
@@ -593,10 +610,11 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
         Ok(()) => info!("Traefik instances have been successfully shut down."),
         Err(e) => error!("Error shutting down Traefik instances: {}", e),
     }
-    
-    db.write_to_file_immediately();
 
-    drop(db);
+    match &db.write_to_file() {
+        Ok(()) => info!("Successfully saved the database."),
+        Err(e) => error!("Error saving the database: {}", e),
+    }
 
     // Delete /tmp/docker_image_latest_tag.cache
     let cache_file = "/tmp/docker_image_latest_tag.cache";

@@ -16,5 +16,7 @@ lazy_static! {
 
     pub static ref DOCKER_IMAGE: String = env::var("DOCKER_IMAGE").expect("Environment variable 'DOCKER_IMAGE' not set.");
 
+    pub static ref SAVE_INTERVAL: u64 = env::var("SAVE_INTERVAL").expect("Environment variable 'SAVE_INTERVAL' not set.").parse::<u64>().expect("Environment variable 'SAVE_INTERVAL' not a number.");
+    
     // pub static ref GITHUB_TOKEN: String = env::var("GITHUB_TOKEN").expect("Environment variable 'GITHUB_TOKEN' not set");
 }

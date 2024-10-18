@@ -1,17 +1,17 @@
+use super::container::ContainerManager;
 use super::traefik;
 use crate::traefik::Instance;
 use bcrypt::{hash, verify};
+use filetime::{set_file_mtime, FileTime};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
-use std::{fmt, io};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, ErrorKind};
-use std::time::{SystemTime, Duration, Instant};
-use filetime::{set_file_mtime, FileTime};
+use std::time::SystemTime;
+use std::{fmt, io};
 use uuid::Uuid;
-use super::container::ContainerManager;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
@@ -32,8 +32,8 @@ pub struct UserDB {
     #[serde(skip)]
     email_to_uid: HashMap<String, isize>,
     file_path: String,
-    #[serde(skip)]
-    last_write_time: Option<Instant>, // Add this field
+    // #[serde(skip)]
+    // last_write_time: Option<Instant>, // Add this field
 }
 
 #[derive(Debug)]
@@ -70,7 +70,7 @@ impl UserDB {
             username_to_uid: HashMap::new(),
             email_to_uid: HashMap::new(),
             file_path: file_path.to_string(),
-            last_write_time: None, // Initialize last_write_time
+            // last_write_time: None, // Initialize last_write_time
         };
         if let Err(e) = udb.write_to_file() {
             error!(
@@ -106,8 +106,6 @@ impl UserDB {
         self.users.insert(uid, user.clone());
         self.username_to_uid.insert(user.username.clone(), uid);
         self.email_to_uid.insert(user.email.clone(), uid);
-
-        self.write_to_file()?; // Write updated database to file
         Ok(())
     }
 
@@ -212,9 +210,6 @@ impl UserDB {
             return Err(Box::new(LoginError::UserNotFound));
         }
 
-        // Write changes to file
-        self.write_to_file()?;
-
         Ok(())
     }
 
@@ -231,9 +226,6 @@ impl UserDB {
         for user in self.users.values_mut() {
             user.token = None;
         }
-
-        // Write the updated database to file
-        self.write_to_file()?;
 
         Ok(())
     }
@@ -265,36 +257,14 @@ impl UserDB {
 
     /// Writes the current user database to a file in JSON format.
     pub fn write_to_file(&mut self) -> Result<(), Box<dyn Error>> {
-        let now = Instant::now();
-        // Check if it's time to write to the file
-        if self.last_write_time.is_none() || now.duration_since(self.last_write_time.unwrap()) >= Duration::from_secs(600) {
-            let file = OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path)?;
-            let writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(writer, &self)?;
-            info!("User database written to file: {}", self.file_path);
-            self.last_write_time = Some(now); // Update the last write time
-        } else {
-            info!("Skipping write_to_file; less than 10 minutes since last write");
-        }
+        let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
+            Ok(result) => result,
+            Err(e) => return Err(Box::new(e)),
+        };
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &self)?;
+        info!("User database written to file: {}", self.file_path);
         Ok(())
-    }
-    pub fn write_to_file_immediately(&mut self) {
-        // Force write to file on drop
-        let now = Instant::now();
-        match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
-            Ok(file) => {
-                let writer = BufWriter::new(file);
-                if let Err(e) = serde_json::to_writer_pretty(writer, &self) {
-                    error!("Failed to write user database immediately: {}", e);
-                } else {
-                    info!("User database written to file immediately: {}", self.file_path);
-                    self.last_write_time = Some(now);
-                }
-            },
-            Err(e) => {
-                error!("Failed to open file for writing immediately: {}", e);
-            }
-        }
     }
 
     /// Reads the user database from a file and returns a `UserDB` instance.
@@ -303,7 +273,7 @@ impl UserDB {
         let reader = BufReader::new(file);
         let mut userdb: UserDB = serde_json::from_reader(reader)?;
         userdb.file_path = file_path.to_string();
-        userdb.last_write_time = Some(Instant::now()); // Initialize last_write_time
+        // userdb.last_write_time = Some(Instant::now()); // Initialize last_write_time
         info!("User database loaded from file: {}", file_path);
 
         // Rebuild username_to_uid and email_to_uid mappings
@@ -321,7 +291,7 @@ impl UserDB {
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
         self.users.values().find(|user| user.token.as_deref() == Some(token))
     }
-    
+
     #[allow(dead_code)]
     pub fn find_user_by_token_mut(&mut self, token: &str) -> Option<&mut User> {
         self.users.values_mut().find(|user| user.token.as_deref() == Some(token))
@@ -360,7 +330,6 @@ impl UserDB {
 impl Drop for UserDB {
     fn drop(&mut self) {
         // Force write to file on drop
-        let now = Instant::now();
         match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
             Ok(file) => {
                 let writer = BufWriter::new(file);
@@ -368,9 +337,8 @@ impl Drop for UserDB {
                     error!("Failed to write user database on drop: {}", e);
                 } else {
                     info!("User database written to file on drop: {}", self.file_path);
-                    self.last_write_time = Some(now);
                 }
-            },
+            }
             Err(e) => {
                 error!("Failed to open file for writing on drop: {}", e);
             }
