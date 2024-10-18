@@ -219,8 +219,15 @@ impl UserDB {
     
     /// Checks and stops containers that have been idle for more than 1200 seconds.
     pub fn check_expiration(&mut self) {
-        let mut user_clone = self.users.clone();
-        for user in user_clone.values_mut() {
+        let mut users_to_logout = Vec::new();
+
+        for user in self.users.values() {
+            // Check if user is already logged out
+            if user.token.is_none() {
+                // User is logged out, skip
+                continue;
+            }
+
             let heartbeat_path = format!(
                 "{}/{}.data/home/.local/share/code-server/heartbeat",
                 *crate::storage::DATADIR, user.uid
@@ -235,23 +242,35 @@ impl UserDB {
                 }) {
                 Ok(duration) if duration.as_secs() >= 1200 => {
                     // If the user has been idle for more than 1200 seconds
-                    if let Err(e) = self.logout(user.uid) {
-                        error!("Failed to log out user '{}': {}", user.username, e);
-                    } else {
-                        info!(
-                            "User '{}' has been idle for {} seconds and logged out.",
-                            user.username, duration.as_secs()
-                        );
-                    }
+                    users_to_logout.push(user.uid);
                 }
                 Ok(duration) => {
                     info!(
-                        "User '{}' has been idle for {} seconds.",
-                        user.username, duration.as_secs()
-                    );
+                    "User '{}' has been idle for {} seconds.",
+                    user.username, duration.as_secs()
+                );
                 }
                 Err(e) => {
                     error!("Failed to check user status '{}': {}", user.username, e);
+                }
+            }
+        }
+
+        // Now, logout users who have been idle for too long
+        for uid in users_to_logout {
+            if let Err(e) = self.logout(uid) {
+                error!("Failed to log out user with UID {}: {}", uid, e);
+            } else {
+                if let Some(user) = self.users.get(&uid) {
+                    info!(
+                    "User '{}' has been idle for more than 1200 seconds and logged out.",
+                    user.username
+                );
+                } else {
+                    info!(
+                    "User with UID {} has been idle for more than 1200 seconds and logged out.",
+                    uid
+                );
                 }
             }
         }
