@@ -149,7 +149,7 @@ impl UserDB {
         let token = UserDB::generate_unique_token();
         user.token = Some(token.clone());
         self.token_to_uid.insert(token.clone(), *uid); // Update the token map
-        
+
         let uid = *uid;
 
         let is_running = match ContainerManager::is_container_running(&uid.to_string()) {
@@ -286,7 +286,6 @@ impl UserDB {
 
         Ok(userdb)
     }
-
 
     /// Finds a user by their token.
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
