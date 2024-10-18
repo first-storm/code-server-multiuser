@@ -274,13 +274,19 @@ impl UserDB {
         // Rebuild username_to_uid and email_to_uid mappings
         userdb.username_to_uid = HashMap::with_capacity(userdb.users.len());
         userdb.email_to_uid = HashMap::with_capacity(userdb.users.len());
+        userdb.token_to_uid = HashMap::new(); // Initialize the token_to_uid map
+
         for (uid, user) in &userdb.users {
             userdb.username_to_uid.insert(user.username.clone(), *uid);
             userdb.email_to_uid.insert(user.email.clone(), *uid);
+            if let Some(token) = &user.token {
+                userdb.token_to_uid.insert(token.clone(), *uid); // Populate token_to_uid
+            }
         }
 
         Ok(userdb)
     }
+
 
     /// Finds a user by their token.
     pub fn find_user_by_token(&self, token: &str) -> Option<&User> {
