@@ -303,7 +303,7 @@ async fn login(
             Ok(HttpResponse::Found().append_header(("LOCATION", "/dashboard")).cookie(cookie).finish())
         } else {
             warn!("Failed login attempt for user: {}", username);
-            let msg = "Invalid username or password.".to_string();
+            let msg = "用户名或密码错误。".to_string();
             login_page(tera, Some(msg)).await
         };
     }
