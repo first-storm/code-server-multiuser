@@ -936,15 +936,15 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
         }
     }
 
-    // Delete /tmp/docker_image_latest_tag.cache
-    let cache_file = "/tmp/docker_image_latest_tag.cache";
-    if Path::new(cache_file).exists() {
-        match fs::remove_file(cache_file) {
-            Ok(_) => info!("Successfully deleted cache file: {}", cache_file),
-            Err(e) => error!("Failed to delete cache file {}: {}", cache_file, e),
+    // Delete the latest-tag cache so the next start fetches a fresh tag.
+    let cache_file = container::cache_file_path();
+    if cache_file.exists() {
+        match fs::remove_file(&cache_file) {
+            Ok(_) => info!("Successfully deleted cache file: {}", cache_file.display()),
+            Err(e) => error!("Failed to delete cache file {}: {}", cache_file.display(), e),
         }
     } else {
-        info!("Cache file does not exist: {}", cache_file);
+        info!("Cache file does not exist: {}", cache_file.display());
     }
 
     info!("Shutdown complete.");

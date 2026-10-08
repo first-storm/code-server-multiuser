@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{self, ErrorKind},
+    path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
     time::{Duration, SystemTime},
@@ -19,6 +20,35 @@ lazy_static! {
     static ref USERNAME: String = env::var("USER").unwrap_or_else(|_| "default_user".to_string());
     static ref VERSION_REGEX: Regex = Regex::new(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$").unwrap();
     static ref CACHE_MUTEX: Mutex<()> = Mutex::new(());
+}
+
+/// Cache file for the latest image tag, placed next to the user database.
+/// The service already owns that directory, so other local users cannot
+/// create or replace the file (a fixed path in the world-writable /tmp
+/// allowed cache poisoning).
+pub(crate) fn cache_file_path() -> PathBuf {
+    Path::new(crate::storage::USERDB.as_str())
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join("docker_image_latest_tag.cache"))
+        .unwrap_or_else(|| PathBuf::from("docker_image_latest_tag.cache"))
+}
+
+/// Return the cached tag when the cache file is fresh (written within the
+/// last hour) and holds a valid `x.y.z.w` version. Anything else is a miss.
+fn read_cached_tag(cache_file: &Path) -> Option<String> {
+    let metadata = fs::metadata(cache_file).ok()?;
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    if age >= Duration::from_secs(3600) {
+        return None;
+    }
+    let tag = fs::read_to_string(cache_file).ok()?.trim().to_string();
+    if VERSION_REGEX.is_match(&tag) {
+        Some(tag)
+    } else {
+        None
+    }
 }
 
 pub struct ContainerManager;
@@ -263,21 +293,12 @@ impl ContainerManager {
 
     /// Get the latest tag version of the image, with a one-hour cache
     pub fn get_latest_image_tag() -> io::Result<String> {
-        let cache_file = "/tmp/docker_image_latest_tag.cache";
+        let cache_file = cache_file_path();
         let _cache_lock = CACHE_MUTEX.lock().unwrap();
 
-        // Check if the cache file exists and is within one hour
-        if let Ok(metadata) = fs::metadata(cache_file) {
-            if let Ok(modified_time) = metadata.modified() {
-                if let Ok(duration) = SystemTime::now().duration_since(modified_time) {
-                    if duration < Duration::from_secs(3600) {
-                        // Cache is valid
-                        if let Ok(cached_tag) = fs::read_to_string(cache_file) {
-                            return Ok(cached_tag.trim().to_string());
-                        }
-                    }
-                }
-            }
+        // Serve from the cache only when the file is fresh and valid.
+        if let Some(cached_tag) = read_cached_tag(&cache_file) {
+            return Ok(cached_tag);
         }
 
         // Parse DOCKER_IMAGE
@@ -341,7 +362,7 @@ impl ContainerManager {
             .ok_or_else(|| io::Error::new(ErrorKind::Other, "No valid version tags found"))?;
 
         // Cache the latest tag
-        fs::write(cache_file, &latest_tag)?;
+        fs::write(&cache_file, &latest_tag)?;
 
         Ok(latest_tag)
     }
@@ -419,5 +440,29 @@ mod tests {
             select_latest_tag(vec!["latest".to_string(), "v1".to_string()]),
             None
         );
+    }
+
+    #[test]
+    fn read_cached_tag_rejects_poisoned_and_stale_content() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let dir = std::env::temp_dir().join(format!("container-cache-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("docker_image_latest_tag.cache");
+
+        // A non-version value (e.g. a poisoned cache) is a miss.
+        fs::write(&cache, "9.9.9.9-poison").unwrap();
+        assert_eq!(read_cached_tag(&cache), None);
+
+        // A valid version tag is a hit.
+        fs::write(&cache, "1.2.3.4").unwrap();
+        assert_eq!(read_cached_tag(&cache), Some("1.2.3.4".to_string()));
+
+        // A cache older than one hour is a miss.
+        let stale = FileTime::from_system_time(SystemTime::now() - Duration::from_secs(3700));
+        set_file_mtime(&cache, stale).unwrap();
+        assert_eq!(read_cached_tag(&cache), None);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
