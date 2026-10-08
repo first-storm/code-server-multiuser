@@ -394,17 +394,6 @@ impl UserDB {
     }
 }
 
-// Implement Drop to ensure data is written when the program exits
-impl Drop for UserDB {
-    fn drop(&mut self) {
-        // Force write to file on drop
-        match self.write_to_file() {
-            Ok(_) => info!("User database written to file on drop: {}", self.file_path),
-            Err(e) => error!("Failed to write user database on drop: {}", e),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,7 +442,7 @@ mod tests {
         );
         assert_eq!(db.find_user_by_token("tok-second").unwrap().uid, 7);
         assert!(!db.token_to_uid.contains_key("tok-first"));
-        drop(db); // Drop writes the db file; drop before cleanup.
+        drop(db);
         let _ = fs::remove_file(&path);
     }
 
@@ -468,7 +457,7 @@ mod tests {
 
         assert!(db.find_user_by_token("tok").is_none());
         assert!(db.users.get(&7).unwrap().token.is_none());
-        drop(db); // Drop writes the db file; drop before cleanup.
+        drop(db);
         let _ = fs::remove_file(&path);
     }
 
@@ -669,6 +658,30 @@ mod tests {
         drop(db);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn dropping_db_does_not_rewrite_the_file() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        db.write_to_file().unwrap();
+
+        // External edit on disk; this is what /reloaddb loads.
+        let raw = fs::read_to_string(&path).unwrap();
+        fs::write(&path, raw.replace("user7@example.com", "edited@example.com")).unwrap();
+
+        // Replacing the live db drops the old one; that must not write
+        // the old in-memory state back over the file.
+        drop(db);
+
+        let loaded = UserDB::read_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.find_user_by_uid(7).unwrap().email,
+            "edited@example.com"
+        );
+        drop(loaded);
+        let _ = fs::remove_file(&path);
     }
 
     fn test_traefik_config_path(db: &UserDB) -> String {
