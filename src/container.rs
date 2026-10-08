@@ -1,17 +1,12 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{self, ErrorKind},
     process::Command,
     sync::Mutex,
     time::{Duration, SystemTime},
 };
 
-use crate::{
-    storage::DOCKER_IMAGE,
-    traefik::{self, Instance},
-    user::User,
-};
+use crate::storage::DOCKER_IMAGE;
 use lazy_static::lazy_static;
 use log::{error, info};
 use regex::Regex;
@@ -34,36 +29,15 @@ impl ContainerManager {
         Self::run_docker_create_command(uid)
     }
 
-    /// Update an existing Docker container
-    pub fn update_container(
-        uid: &str,
-        token: &str,
-        traefik_instances: &mut traefik::Instances,
-    ) -> io::Result<()> {
-        let container_id = format!("{}.codeserver", uid);
-
-        if Self::is_container_running(uid)? {
-            Self::stop_container(&container_id, traefik_instances)?;
-        }
-
-        Self::remove_container(&container_id)?;
-
-        Self::pull_latest_image()?;
-
-        Self::run_docker_create_command(uid)?;
-
-        Self::start_container(&container_id, token, traefik_instances)?;
-
-        Ok(())
-    }
-
-    /// Start Docker container
-    pub fn start_container(
-        container_id: &str,
-        token: &str,
-        traefik_instances: &mut traefik::Instances,
-    ) -> io::Result<()> {
-        let output = Command::new("docker").arg("start").arg(container_id).output()?;
+    /// Start a Docker container and run the first-boot setup commands
+    /// inside it. Blocking: callers on async runtimes must run this in
+    /// `spawn_blocking`. This only touches Docker; Traefik bookkeeping is
+    /// done separately by the caller under a short database lock.
+    pub fn start_container_docker(container_id: &str) -> io::Result<()> {
+        let output = Command::new("docker")
+            .arg("start")
+            .arg(container_id)
+            .output()?;
 
         if output.status.success() {
             info!("Successfully started container: {}", container_id);
@@ -98,15 +72,6 @@ impl ContainerManager {
                 return Err(io::Error::new(ErrorKind::Other, exec_error.to_string()));
             }
 
-            if let Err(e) = traefik_instances.add(Instance {
-                name: container_id.to_string(),
-                token: token.to_string(),
-            }) {
-                let error_message = format!("Failed to add Traefik instance: {}", e);
-                error!("{}", error_message);
-                return Err(io::Error::new(ErrorKind::Other, error_message));
-            }
-
             Ok(())
         } else {
             let error_message = format!(
@@ -119,21 +84,17 @@ impl ContainerManager {
         }
     }
 
-    /// Stop Docker container
-    pub fn stop_container(
-        container_id: &str,
-        traefik_instances: &mut traefik::Instances,
-    ) -> io::Result<()> {
-        let output = Command::new("docker").arg("stop").arg(container_id).output()?;
+    /// Stop a Docker container. Blocking: callers on async runtimes must
+    /// run this in `spawn_blocking`. This only touches Docker; Traefik
+    /// bookkeeping is done separately by the caller under a short lock.
+    pub fn stop_container_docker(container_id: &str) -> io::Result<()> {
+        let output = Command::new("docker")
+            .arg("stop")
+            .arg(container_id)
+            .output()?;
 
         if output.status.success() {
             info!("Successfully stopped container: {}", container_id);
-            if let Err(e) = traefik_instances.remove(container_id) {
-                error!(
-                    "Failed to remove Traefik instance for container {}: {}",
-                    container_id, e
-                );
-            }
             Ok(())
         } else {
             let error_message = format!(
@@ -168,42 +129,13 @@ impl ContainerManager {
         }
     }
 
-    /// Log out a user
-    pub fn logout_user(
-        user: &mut User,
-        traefik_instances: &mut traefik::Instances,
-    ) -> io::Result<()> {
-        let container_id = format!("{}.codeserver", user.uid);
-
-        // Stop the container if it's running
-        if Self::is_container_running(&user.uid.to_string())? {
-            Self::stop_container(&container_id, traefik_instances)?;
-        }
-
-        // No longer clear the user's token here
-        info!("Container stopped for user: {}", user.username);
-
-        Ok(())
-    }
-
-    /// Log out all users
-    pub fn logout_all_users<'a>(
-        users: impl Iterator<Item = &'a mut User>,
-        traefik_instances: &mut traefik::Instances,
-    ) -> io::Result<()> {
-        for user in users {
-            if let Err(e) = Self::logout_user(user, traefik_instances) {
-                error!("Failed to log out user '{}': {}", user.username, e);
-            } else {
-                info!("Successfully logged out user '{}'", user.username);
-            }
-        }
-        Ok(())
-    }
-
     /// Private function to build Docker create command
     fn build_docker_create_command(uid: &str) -> io::Result<Command> {
-        let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), Self::get_latest_image_tag()?);
+        let image_with_tag = format!(
+            "{}:{}",
+            DOCKER_IMAGE.as_str(),
+            Self::get_latest_image_tag()?
+        );
 
         let mut command = Command::new("docker");
         command
@@ -257,9 +189,13 @@ impl ContainerManager {
         }
     }
 
-    /// Private function to remove Docker container
-    fn remove_container(container_id: &str) -> io::Result<()> {
-        let output = Command::new("docker").arg("rm").arg(container_id).output()?;
+    /// Remove a Docker container. Blocking: callers on async runtimes
+    /// must run this in `spawn_blocking`.
+    pub fn remove_container(container_id: &str) -> io::Result<()> {
+        let output = Command::new("docker")
+            .arg("rm")
+            .arg(container_id)
+            .output()?;
 
         if output.status.success() {
             info!("Successfully removed container '{}'", container_id);
@@ -277,8 +213,9 @@ impl ContainerManager {
         }
     }
 
-    /// Private function to pull the latest Docker image
-    fn pull_latest_image() -> io::Result<()> {
+    /// Pull the latest Docker image. Blocking: callers on async runtimes
+    /// must run this in `spawn_blocking`.
+    pub fn pull_latest_image() -> io::Result<()> {
         let latest_tag = Self::get_latest_image_tag()?;
         let image_with_tag = format!("{}:{}", DOCKER_IMAGE.as_str(), latest_tag);
 
@@ -313,16 +250,8 @@ impl ContainerManager {
             .output()?;
 
         if output.status.success() {
-            let image_full_name = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
-            // Extract the tag part
-            if let Some(tag) = image_full_name.split(':').nth(1) {
-                Ok(tag.to_string())
-            } else {
-                // Default tag is 'latest' if not specified
-                Ok("latest".to_string())
-            }
+            let image_full_name = String::from_utf8_lossy(&output.stdout);
+            Ok(parse_image_tag(image_full_name.trim()).to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(io::Error::new(
@@ -408,35 +337,8 @@ impl ContainerManager {
             .json()
             .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
-        // Collect all valid versions and corresponding tags
-        let mut version_tags: Vec<((u64, u64, u64, u64), String)> = tags_resp
-            .tags
-            .into_iter()
-            .filter_map(|tag| {
-                VERSION_REGEX.captures(&tag).and_then(|caps| {
-                    Some((
-                        (
-                            caps.get(1)?.as_str().parse().ok()?,
-                            caps.get(2)?.as_str().parse().ok()?,
-                            caps.get(3)?.as_str().parse().ok()?,
-                            caps.get(4)?.as_str().parse().ok()?,
-                        ),
-                        tag.to_string()
-                    ))
-                })
-            })
-            .collect();
-
-        if version_tags.is_empty() {
-            return Err(io::Error::new(
-                ErrorKind::Other,
-                "No valid version tags found",
-            ));
-        }
-
-        // Find the highest version
-        version_tags.sort_by(|a, b| b.0.cmp(&a.0));
-        let latest_tag = version_tags.first().unwrap().1.clone();
+        let latest_tag = select_latest_tag(tags_resp.tags)
+            .ok_or_else(|| io::Error::new(ErrorKind::Other, "No valid version tags found"))?;
 
         // Cache the latest tag
         fs::write(cache_file, &latest_tag)?;
@@ -450,5 +352,72 @@ impl ContainerManager {
         let container_tag = Self::get_container_tag(container_id)?;
         let latest_tag = Self::get_latest_image_tag()?;
         Ok(container_tag == latest_tag)
+    }
+}
+
+/// Extract the tag from a `docker inspect` image reference.
+/// Uses the last `:` so registries with a port (e.g.
+/// `localhost:5000/user/image:1.0.0.0`) parse correctly.
+fn parse_image_tag(image_full_name: &str) -> &str {
+    image_full_name
+        .rsplit_once(':')
+        .map(|(_, tag)| tag)
+        .unwrap_or("latest")
+}
+
+/// Pick the highest `x.y.z.w` version tag, ignoring anything else.
+fn select_latest_tag(tags: Vec<String>) -> Option<String> {
+    let mut version_tags: Vec<((u64, u64, u64, u64), String)> = tags
+        .into_iter()
+        .filter_map(|tag| {
+            let version = VERSION_REGEX.captures(&tag).and_then(|caps| {
+                Some((
+                    caps.get(1)?.as_str().parse().ok()?,
+                    caps.get(2)?.as_str().parse().ok()?,
+                    caps.get(3)?.as_str().parse().ok()?,
+                    caps.get(4)?.as_str().parse().ok()?,
+                ))
+            })?;
+            Some((version, tag))
+        })
+        .collect();
+
+    version_tags.sort_by_key(|(version, _)| std::cmp::Reverse(*version));
+    version_tags.into_iter().next().map(|(_, tag)| tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_image_tag_handles_registries_with_ports() {
+        assert_eq!(parse_image_tag("ghcr.io/user/image:1.2.3.4"), "1.2.3.4");
+        assert_eq!(
+            parse_image_tag("localhost:5000/user/image:2.0.0.0"),
+            "2.0.0.0"
+        );
+        assert_eq!(parse_image_tag("image"), "latest");
+    }
+
+    #[test]
+    fn select_latest_tag_picks_highest_version() {
+        let tags = vec![
+            "1.2.3.4".to_string(),
+            "latest".to_string(),
+            "1.10.0.0".to_string(),
+            "not-a-version".to_string(),
+            "1.2.3.10".to_string(),
+        ];
+        assert_eq!(select_latest_tag(tags).as_deref(), Some("1.10.0.0"));
+    }
+
+    #[test]
+    fn select_latest_tag_returns_none_without_valid_tags() {
+        assert_eq!(select_latest_tag(vec![]), None);
+        assert_eq!(
+            select_latest_tag(vec!["latest".to_string(), "v1".to_string()]),
+            None
+        );
     }
 }

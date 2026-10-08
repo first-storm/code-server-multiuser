@@ -35,6 +35,11 @@ impl Instances {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn config_path(&self) -> &str {
+        &self.config_path
+    }
+
     pub fn add(&mut self, instance: Instance) -> Result<(), io::Error> {
         // If an instance with the same name already exists (e.g. the user
         // logged in again and got a fresh token), drop the stale token
@@ -43,7 +48,8 @@ impl Instances {
             self.token_to_name.remove(&old.token);
         }
         // Insert or update the instance
-        self.instances.insert(instance.name.clone(), instance.clone());
+        self.instances
+            .insert(instance.name.clone(), instance.clone());
         // Update the token_to_name mapping
         self.token_to_name
             .insert(instance.token.clone(), instance.name.clone());
@@ -56,8 +62,7 @@ impl Instances {
     /// (`<uid>.codeserver`), which is the instance name.
     pub fn remove(&mut self, instance_name: &str) -> Result<(), io::Error> {
         if self.instances.swap_remove(instance_name).is_some() {
-            self.token_to_name
-                .retain(|_, name| name != instance_name);
+            self.token_to_name.retain(|_, name| name != instance_name);
         }
         self.save_config()
     }
@@ -78,9 +83,9 @@ impl Instances {
     }
 
     pub fn shutdown(&mut self) -> Result<(), io::Error> {
-        self.instances.clear();      // Clear instances
-        self.token_to_name.clear();  // Clear token mappings
-        self.save_config()?;         // Save the empty configuration
+        self.instances.clear(); // Clear instances
+        self.token_to_name.clear(); // Clear token mappings
+        self.save_config()?; // Save the empty configuration
         Ok(())
     }
 
@@ -88,8 +93,8 @@ impl Instances {
         // Generate the Traefik dynamic configuration based on current instances
         let mut config = DynamicConfig {
             http: HttpConfig {
-                routers: HashMap::new(),   // Use HashMap instead of IndexMap
-                services: HashMap::new(),  // Use HashMap instead of IndexMap
+                routers: HashMap::new(),  // Use HashMap instead of IndexMap
+                services: HashMap::new(), // Use HashMap instead of IndexMap
             },
         };
 
@@ -107,8 +112,14 @@ impl Instances {
                     passHostHeader: true,
                 },
             };
-            config.http.services.insert(format!("{}-service", instance_name), service);
-            config.http.routers.insert(format!("{}-router", instance_name), router);
+            config
+                .http
+                .services
+                .insert(format!("{}-service", instance_name), service);
+            config
+                .http
+                .routers
+                .insert(format!("{}-router", instance_name), router);
         }
 
         // Serialize to a YAML string and return

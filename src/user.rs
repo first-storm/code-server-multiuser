@@ -1,17 +1,21 @@
-use super::container::ContainerManager;
 use super::traefik;
 use crate::traefik::Instance;
-use bcrypt::{hash, verify};
 use filetime::{set_file_mtime, FileTime};
-use log::{error, info, warn};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, ErrorKind};
+use std::io::{BufReader, BufWriter, ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::SystemTime;
-use std::{fmt, fs, io};
+use std::{fs, io};
 use uuid::Uuid;
+
+/// Seconds of heartbeat silence after which a session is considered idle
+/// and its container is stopped.
+pub const IDLE_TIMEOUT_SECS: u64 = 1200;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
@@ -35,25 +39,6 @@ pub struct UserDB {
     token_to_uid: HashMap<String, isize>,
     file_path: String,
 }
-
-#[derive(Debug)]
-pub enum LoginError {
-    UserNotFound,
-    IncorrectPassword,
-    ContainerError(String),
-}
-
-impl fmt::Display for LoginError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LoginError::UserNotFound => write!(f, "User not found"),
-            LoginError::IncorrectPassword => write!(f, "Incorrect password"),
-            LoginError::ContainerError(msg) => write!(f, "Container error: {}", msg),
-        }
-    }
-}
-
-impl Error for LoginError {}
 
 impl UserDB {
     /// Generates a unique token for user authentication.
@@ -120,7 +105,7 @@ impl UserDB {
     /// Creates a new `UserDB` instance with the given file path and writes the empty database to the file.
     pub fn new(file_path: &str) -> UserDB {
         info!("Creating a new user database with file path: {}", file_path);
-        let mut udb = UserDB {
+        let udb = UserDB {
             traefik_instances: traefik::Instances::new(),
             users: HashMap::new(),
             username_to_uid: HashMap::new(),
@@ -137,27 +122,24 @@ impl UserDB {
         udb
     }
 
-    /// Adds a new user to the database and writes the updated database to file.
-    pub fn add_user(&mut self, mut user: User) -> Result<(), Box<dyn Error>> {
+    /// Inserts a user record with all index mappings. The password must
+    /// already be hashed by the caller (hashing is CPU-bound and runs in
+    /// a blocking thread). Does not touch Docker; the caller creates the
+    /// container outside the database lock and rolls back with
+    /// `remove_user_record` on failure.
+    pub fn add_user_record(&mut self, user: User) -> Result<(), Box<dyn Error>> {
         if self.username_exists(&user.username) {
             return Err("Username already exists".into());
         }
         if self.email_exists(&user.email) {
             return Err("Email already exists".into());
         }
+        if self.uid_exists(user.uid) {
+            return Err("UID already exists".into());
+        }
 
-        user.password = hash(&user.password, bcrypt::DEFAULT_COST)?; // Hash the user's password
         info!("Adding new user: {}", user.username);
 
-        // Create and start Docker container for the new user
-        ContainerManager::create_container(&user.uid.to_string()).map_err(|e| {
-            error!("Failed to create container for user {}: {}", user.username, e);
-            e
-        })?;
-
-        info!("Successfully created container for user: {}", user.username);
-
-        // Add user to the users HashMap and update mappings
         let uid = user.uid;
         let username = user.username.clone();
         let email = user.email.clone();
@@ -167,16 +149,30 @@ impl UserDB {
         Ok(())
     }
 
+    /// Removes a user record and all of its index mappings. Used to roll
+    /// back a registration whose container creation failed.
+    pub fn remove_user_record(&mut self, uid: isize) {
+        if let Some(user) = self.users.remove(&uid) {
+            self.username_to_uid.remove(&user.username);
+            self.email_to_uid.remove(&user.email);
+            if let Some(token) = &user.token {
+                self.token_to_uid.remove(token);
+            }
+            info!("Removed user record for UID {}", uid);
+        }
+    }
+
     fn update_file_mtime(file_path: &str) -> io::Result<()> {
         let mtime = FileTime::now();
         set_file_mtime(file_path, mtime)?;
         Ok(())
     }
 
-    fn refresh_heartbeat(uid: isize) {
+    pub(crate) fn refresh_heartbeat(uid: isize) {
         match Self::update_file_mtime(&format!(
             "{}/{}.data/home/.local/share/code-server/heartbeat",
-            *crate::storage::DATADIR, uid
+            *crate::storage::DATADIR,
+            uid
         )) {
             Ok(_) => (),
             Err(e) => {
@@ -185,97 +181,76 @@ impl UserDB {
         }
     }
 
-    pub fn login(&mut self, username: &str, password: &str) -> Result<String, LoginError> {
-        // First, get user UID from username_to_uid
-        let uid = self.username_to_uid.get(username).ok_or_else(|| {
-            warn!("User '{}' not found", username);
-            LoginError::UserNotFound
-        })?;
-        // Borrow the user mutably
-        let user = self.users.get_mut(uid).ok_or_else(|| {
-            warn!("User '{}' not found in users HashMap", username);
-            LoginError::UserNotFound
-        })?;
-        // Verify password
-        if !verify(password, &user.password).map_err(|_| LoginError::IncorrectPassword)? {
-            warn!("Incorrect password for user: {}", username);
-            return Err(LoginError::IncorrectPassword);
-        }
-
-        // Generate a unique token, dropping any previous token mapping
-        // so a re-login invalidates the old session.
-        let uid = *uid;
-        let token = UserDB::generate_unique_token();
-        self.set_user_token(uid, token.clone());
-
-        let is_running = match ContainerManager::is_container_running(&uid.to_string()) {
-            Ok(is_running) => is_running,
-            Err(e) => {
-                error!("Failed to check container status for user {}: {}", username, e);
-                return Err(LoginError::ContainerError(e.to_string()));
-            }
-        };
-
-        // Update heartbeat file
-        Self::refresh_heartbeat(uid);
-
-        if is_running {
-            info!("Container is already running for user: {}", username);
-
-            // Ensure to add a Traefik instance even if the container is running
-            self.traefik_instances.add(Instance {
-                name: format!("{}.codeserver", uid),
-                token: token.clone(),
-            }).map_err(|e| {
-                let error_message = format!("Failed to add traefik instance: {}", e);
-                error!("{}", error_message);
-                LoginError::ContainerError(error_message)
-            })?;
-        } else {
-            // If the container is not running, start the container
-            info!("Starting container for user: {}", username);
-            ContainerManager::start_container(
-                &format!("{}.codeserver", uid),
-                &token,
-                &mut self.traefik_instances,
-            ).map_err(|e| {
-                error!("Failed to start container for user {}: {}", username, e);
-                LoginError::ContainerError(e.to_string())
-            })?;
-            info!("Successfully started container for user: {}", username);
-        }
-
-        info!("Login successful for user: {}", username);
-        Ok(token) // Return the generated token
+    /// Returns the uid and stored password hash for a username, if it exists.
+    /// Read-only so handlers can verify the password in a blocking thread
+    /// without holding any lock.
+    pub fn credential_for(&self, username: &str) -> Option<(isize, String)> {
+        let uid = *self.username_to_uid.get(username)?;
+        let user = self.users.get(&uid)?;
+        Some((uid, user.password.clone()))
     }
 
-    pub fn logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
-        if let Some(user) = self.users.get_mut(&uid) {
-            ContainerManager::logout_user(user, &mut self.traefik_instances)?;
+    /// Mints a fresh session token for a user, invalidating the previous one.
+    pub fn publish_session(&mut self, uid: isize) -> String {
+        let token = UserDB::generate_unique_token();
+        self.set_user_token(uid, token.clone());
+        token
+    }
+
+    /// Routes a user's container in Traefik under the given session token.
+    pub fn register_traefik_instance(&mut self, uid: isize, token: &str) -> io::Result<()> {
+        self.traefik_instances
+            .add(Instance {
+                name: format!("{}.codeserver", uid),
+                token: token.to_string(),
+            })
+            .map_err(|e| {
+                let error_message = format!("Failed to add traefik instance: {}", e);
+                error!("{}", error_message);
+                io::Error::new(ErrorKind::Other, error_message)
+            })
+    }
+
+    /// Finishes a logout: removes the Traefik route and clears the session
+    /// token. The caller stops the Docker container beforehand, outside
+    /// the database lock.
+    pub fn finish_logout(&mut self, uid: isize) -> Result<(), Box<dyn Error>> {
+        if let Some(user) = self.users.get(&uid) {
+            let container_id = format!("{}.codeserver", uid);
             let username = user.username.clone();
-            self.clear_user_token(uid); // Clear the user's token
+            if let Err(e) = self.traefik_instances.remove(&container_id) {
+                error!(
+                    "Failed to remove Traefik instance for container {}: {}",
+                    container_id, e
+                );
+            }
+            self.clear_user_token(uid);
             info!("User '{}' logged out successfully", username);
         } else {
             error!("User with UID {} not found for logout", uid);
-            return Err(Box::new(LoginError::UserNotFound));
+            return Err(Box::new(io::Error::new(
+                ErrorKind::NotFound,
+                format!("User with UID {} not found", uid),
+            )));
         }
         Ok(())
     }
 
-    /// Checks and stops containers that have been idle for more than 1200 seconds.
-    pub fn check_expiration(&mut self) {
-        let mut users_to_logout = Vec::new();
+    /// Returns the uids of logged-in users whose heartbeat has been silent
+    /// for at least `IDLE_TIMEOUT_SECS`. Read-only; the caller stops each
+    /// container outside the lock and then calls `finish_logout`.
+    pub fn expired_uids(&self) -> Vec<isize> {
+        let mut expired = Vec::new();
 
         for user in self.users.values() {
-            // Check if user is already logged out
             if user.token.is_none() {
-                // User is logged out, skip
                 continue;
             }
 
             let heartbeat_path = format!(
                 "{}/{}.data/home/.local/share/code-server/heartbeat",
-                *crate::storage::DATADIR, user.uid
+                *crate::storage::DATADIR,
+                user.uid
             );
 
             match fs::metadata(&heartbeat_path)
@@ -285,15 +260,15 @@ impl UserDB {
                         .duration_since(modified_time)
                         .map_err(|e| io::Error::new(ErrorKind::Other, e))
                 }) {
-                Ok(duration) if duration.as_secs() >= 1200 => {
-                    // If the user has been idle for more than 1200 seconds
-                    users_to_logout.push(user.uid);
+                Ok(duration) if duration.as_secs() >= IDLE_TIMEOUT_SECS => {
+                    expired.push(user.uid);
                 }
                 Ok(duration) => {
                     info!(
-                    "User '{}' has been idle for {} seconds.",
-                    user.username, duration.as_secs()
-                );
+                        "User '{}' has been idle for {} seconds.",
+                        user.username,
+                        duration.as_secs()
+                    );
                 }
                 Err(e) => {
                     error!("Failed to check user status '{}': {}", user.username, e);
@@ -301,36 +276,26 @@ impl UserDB {
             }
         }
 
-        // Now, logout users who have been idle for too long
-        for uid in users_to_logout {
-            if let Err(e) = self.logout(uid) {
-                error!("Failed to log out user with UID {}: {}", uid, e);
-            } else {
-                if let Some(user) = self.users.get(&uid) {
-                    info!(
-                    "User '{}' has been idle for more than 1200 seconds and logged out.",
-                    user.username
-                );
-                } else {
-                    info!(
-                    "User with UID {} has been idle for more than 1200 seconds and logged out.",
-                    uid
-                );
-                }
-            }
-        }
+        expired
     }
 
-    /// Logs out all users by stopping their containers and clearing their tokens.
-    pub fn logout_all_users(&mut self) -> Result<(), Box<dyn Error>> {
-        ContainerManager::logout_all_users(self.users.values_mut(), &mut self.traefik_instances)?;
-
-        // Clear tokens for all users using the new method
+    /// Clears every session token and empties the Traefik routing table.
+    /// The caller stops the Docker containers beforehand, outside the lock.
+    pub fn clear_all_sessions(&mut self) -> Result<(), Box<dyn Error>> {
         for uid in self.users.keys().cloned().collect::<Vec<_>>() {
             self.clear_user_token(uid);
         }
-
+        self.traefik_instances.shutdown()?;
         Ok(())
+    }
+
+    /// Container names (`<uid>.codeserver`) of all known users, for
+    /// shutdown handling.
+    pub fn container_names(&self) -> Vec<String> {
+        self.users
+            .keys()
+            .map(|uid| format!("{}.codeserver", uid))
+            .collect()
     }
 
     /// Check if a username exists in the database.
@@ -359,13 +324,23 @@ impl UserDB {
     }
 
     /// Writes the current user database to a file in JSON format.
-    pub fn write_to_file(&mut self) -> Result<(), Box<dyn Error>> {
-        let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&self.file_path) {
-            Ok(result) => result,
-            Err(e) => return Err(Box::new(e)),
-        };
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &self)?;
+    /// Takes `&self` so periodic saves only need a read lock. The write
+    /// is atomic (tmp file + rename) so a crash never leaves a truncated
+    /// database, and the file is restricted to owner-only access because
+    /// it contains password hashes and session tokens.
+    pub fn write_to_file(&self) -> Result<(), Box<dyn Error>> {
+        let tmp_path = format!("{}.tmp", self.file_path);
+        {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let file = options.open(&tmp_path)?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer_pretty(writer.by_ref(), self)?;
+            writer.flush()?;
+        }
+        fs::rename(&tmp_path, &self.file_path)?;
         info!("User database written to file: {}", self.file_path);
         Ok(())
     }
@@ -408,9 +383,7 @@ impl UserDB {
             .and_then(|uid| self.users.get_mut(uid))
     }
 
-
     /// Finds a user by their UID.
-    #[allow(dead_code)]
     pub fn find_user_by_uid(&self, uid: isize) -> Option<&User> {
         self.users.get(&uid)
     }
@@ -419,21 +392,15 @@ impl UserDB {
     pub fn find_user_by_uid_mut(&mut self, uid: isize) -> Option<&mut User> {
         self.users.get_mut(&uid)
     }
+}
 
-    pub fn update_user_container(&mut self, uid: isize) -> io::Result<()> {
-        // First, find the user and clone the token if it exists
-        let token = if let Some(user) = self.users.get(&uid) {
-            user.token.clone()
-        } else {
-            return Err(io::Error::new(ErrorKind::NotFound, "User not found"));
-        };
-
-        // Now, perform the mutable operation on traefik_instances
-        if let Some(token) = token {
-            ContainerManager::update_container(&uid.to_string(), &token, &mut self.traefik_instances)?;
-            Ok(())
-        } else {
-            Err(io::Error::new(ErrorKind::Other, "User not logged in"))
+// Implement Drop to ensure data is written when the program exits
+impl Drop for UserDB {
+    fn drop(&mut self) {
+        // Force write to file on drop
+        match self.write_to_file() {
+            Ok(_) => info!("User database written to file on drop: {}", self.file_path),
+            Err(e) => error!("Failed to write user database on drop: {}", e),
         }
     }
 }
@@ -448,7 +415,12 @@ mod tests {
     fn temp_path(prefix: &str) -> String {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir()
-            .join(format!("userdb-test-{}-{}-{}.json", prefix, std::process::id(), id))
+            .join(format!(
+                "userdb-test-{}-{}-{}.json",
+                prefix,
+                std::process::id(),
+                id
+            ))
             .to_string_lossy()
             .to_string()
     }
@@ -517,15 +489,189 @@ mod tests {
         assert_eq!(loaded.find_user_by_token("tok-persist").unwrap().uid, 7);
         let _ = fs::remove_file(&path);
     }
-}
 
-// Implement Drop to ensure data is written when the program exits
-impl Drop for UserDB {
-    fn drop(&mut self) {
-        // Force write to file on drop
-        match self.write_to_file() {
-            Ok(_) => info!("User database written to file on drop: {}", self.file_path),
-            Err(e) => error!("Failed to write user database on drop: {}", e),
+    #[test]
+    fn write_to_file_is_atomic_and_owner_only() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        db.write_to_file().unwrap();
+
+        // No tmp file may be left behind after the atomic rename.
+        assert!(
+            fs::metadata(format!("{}.tmp", path)).is_err(),
+            "tmp file must be renamed away"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "db file must be owner-only");
         }
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_user_record_rejects_duplicates() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+
+        let mut dup_name = test_user(8);
+        dup_name.username = "user7".to_string();
+        assert!(db.add_user_record(dup_name).is_err());
+
+        let mut dup_email = test_user(8);
+        dup_email.email = "user7@example.com".to_string();
+        assert!(db.add_user_record(dup_email).is_err());
+
+        let mut dup_uid = test_user(7);
+        dup_uid.username = "other".to_string();
+        dup_uid.email = "other@example.com".to_string();
+        assert!(db.add_user_record(dup_uid).is_err());
+
+        assert!(db.add_user_record(test_user(9)).is_ok());
+        assert!(db.uid_exists(9));
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn remove_user_record_clears_all_mappings() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        db.set_user_token(7, "tok".to_string());
+
+        db.remove_user_record(7);
+
+        assert!(!db.uid_exists(7));
+        assert!(!db.username_exists("user7"));
+        assert!(!db.email_exists("user7@example.com"));
+        assert!(db.find_user_by_token("tok").is_none());
+        // Removing an unknown uid is a no-op, not a panic.
+        db.remove_user_record(7);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn credential_for_returns_uid_and_hash() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+
+        assert_eq!(db.credential_for("user7"), Some((7, "hashed".to_string())));
+        assert_eq!(db.credential_for("nobody"), None);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn publish_session_rotates_token() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+
+        let first = db.publish_session(7);
+        assert!(db.find_user_by_token(&first).is_some());
+        let second = db.publish_session(7);
+
+        assert_ne!(first, second);
+        assert!(db.find_user_by_token(&first).is_none());
+        assert_eq!(db.find_user_by_token(&second).unwrap().uid, 7);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn register_and_finish_logout_manage_traefik_route() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        let token = db.publish_session(7);
+
+        db.register_traefik_instance(7, &token).unwrap();
+        let config_path = test_traefik_config_path(&db);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("7.codeserver-router"));
+        assert!(config.contains(&token));
+
+        db.finish_logout(7).unwrap();
+        assert!(db.find_user_by_token(&token).is_none());
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !config.contains(&token),
+            "logout must remove the traefik route"
+        );
+
+        assert!(db.finish_logout(999).is_err());
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn expired_uids_flags_only_idle_sessions() {
+        let datadir = std::env::temp_dir().join(format!("userdb-datadir-{}", std::process::id()));
+        std::env::set_var("DATADIR", &datadir);
+
+        // uid 21: heartbeat went silent long ago -> expired.
+        // uid 22: fresh heartbeat -> active.
+        // uid 23: logged out (no token) -> skipped.
+        for (uid, age_secs) in [(21isize, 7200u64), (22, 0)] {
+            let dir = datadir.join(format!("{}.data/home/.local/share/code-server", uid));
+            fs::create_dir_all(&dir).unwrap();
+            let heartbeat = dir.join("heartbeat");
+            fs::write(&heartbeat, b"beat").unwrap();
+            let mtime = FileTime::from_system_time(
+                SystemTime::now() - std::time::Duration::from_secs(age_secs),
+            );
+            filetime::set_file_mtime(&heartbeat, mtime).unwrap();
+        }
+
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        for uid in [21, 22, 23] {
+            db.insert_for_test(test_user(uid));
+        }
+        db.set_user_token(21, "tok-21".to_string());
+        db.set_user_token(22, "tok-22".to_string());
+
+        assert_eq!(db.expired_uids(), vec![21]);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&datadir);
+    }
+
+    #[test]
+    fn clear_all_sessions_empties_tokens_and_routes() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        let token = db.publish_session(7);
+        db.register_traefik_instance(7, &token).unwrap();
+
+        db.clear_all_sessions().unwrap();
+
+        assert!(db.find_user_by_token(&token).is_none());
+        let config = fs::read_to_string(test_traefik_config_path(&db)).unwrap();
+        assert!(!config.contains("codeserver-router"));
+
+        let config_path = test_traefik_config_path(&db);
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&config_path);
+    }
+
+    fn test_traefik_config_path(db: &UserDB) -> String {
+        db.traefik_instances.config_path().to_string()
     }
 }
