@@ -61,6 +61,41 @@ impl UserDB {
         Uuid::now_v7().to_string()
     }
 
+    /// Build an empty UserDB for tests without touching docker or
+    /// environment variables.
+    #[cfg(test)]
+    pub(crate) fn empty_for_test(file_path: &str) -> UserDB {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let traefik_path = std::env::temp_dir()
+            .join(format!(
+                "userdb-test-traefik-{}-{}.yml",
+                std::process::id(),
+                id
+            ))
+            .to_string_lossy()
+            .to_string();
+        UserDB {
+            traefik_instances: traefik::Instances::with_config_path(traefik_path),
+            users: HashMap::new(),
+            username_to_uid: HashMap::new(),
+            email_to_uid: HashMap::new(),
+            token_to_uid: HashMap::new(),
+            file_path: file_path.to_string(),
+        }
+    }
+
+    /// Insert a user record for tests without creating any container.
+    /// The password is stored as given (tests pass a pre-hashed value).
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&mut self, user: User) {
+        let uid = user.uid;
+        self.username_to_uid.insert(user.username.clone(), uid);
+        self.email_to_uid.insert(user.email.clone(), uid);
+        self.users.insert(uid, user);
+    }
+
     /// Clears the token for a user and updates the token_to_uid map
     pub fn clear_user_token(&mut self, uid: isize) {
         if let Some(user) = self.users.get_mut(&uid) {
@@ -68,6 +103,17 @@ impl UserDB {
                 self.token_to_uid.remove(token);
             }
             user.token = None;
+        }
+    }
+
+    /// Assigns a new token to a user, dropping the previous token mapping
+    /// so stale tokens stop authenticating (e.g. after a re-login).
+    pub fn set_user_token(&mut self, uid: isize, token: String) {
+        if let Some(user) = self.users.get_mut(&uid) {
+            if let Some(old_token) = user.token.replace(token.clone()) {
+                self.token_to_uid.remove(&old_token);
+            }
+            self.token_to_uid.insert(token, uid);
         }
     }
 
@@ -156,12 +202,11 @@ impl UserDB {
             return Err(LoginError::IncorrectPassword);
         }
 
-        // Generate a unique token
-        let token = UserDB::generate_unique_token();
-        user.token = Some(token.clone());
-        self.token_to_uid.insert(token.clone(), *uid); // Update the token map
-
+        // Generate a unique token, dropping any previous token mapping
+        // so a re-login invalidates the old session.
         let uid = *uid;
+        let token = UserDB::generate_unique_token();
+        self.set_user_token(uid, token.clone());
 
         let is_running = match ContainerManager::is_container_running(&uid.to_string()) {
             Ok(is_running) => is_running,
@@ -390,6 +435,87 @@ impl UserDB {
         } else {
             Err(io::Error::new(ErrorKind::Other, "User not logged in"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_path(prefix: &str) -> String {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir()
+            .join(format!("userdb-test-{}-{}-{}.json", prefix, std::process::id(), id))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn test_user(uid: isize) -> User {
+        User {
+            uid,
+            username: format!("user{}", uid),
+            email: format!("user{}@example.com", uid),
+            password: "hashed".to_string(),
+            token: None,
+            is_updating: false,
+        }
+    }
+
+    #[test]
+    fn set_user_token_drops_old_token_mapping() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+
+        db.insert_for_test(test_user(7));
+        db.set_user_token(7, "tok-first".to_string());
+        assert!(db.find_user_by_token("tok-first").is_some());
+
+        // Re-login rotates the token: the old one must stop resolving.
+        db.set_user_token(7, "tok-second".to_string());
+        assert!(
+            db.find_user_by_token("tok-first").is_none(),
+            "stale token must not authenticate after rotation"
+        );
+        assert_eq!(db.find_user_by_token("tok-second").unwrap().uid, 7);
+        assert!(!db.token_to_uid.contains_key("tok-first"));
+        drop(db); // Drop writes the db file; drop before cleanup.
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clear_user_token_removes_token_mapping() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+
+        db.insert_for_test(test_user(7));
+        db.set_user_token(7, "tok".to_string());
+        db.clear_user_token(7);
+
+        assert!(db.find_user_by_token("tok").is_none());
+        assert!(db.users.get(&7).unwrap().token.is_none());
+        drop(db); // Drop writes the db file; drop before cleanup.
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_then_read_roundtrip_rebuilds_indexes() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+
+        db.insert_for_test(test_user(7));
+        db.set_user_token(7, "tok-persist".to_string());
+        db.write_to_file().unwrap();
+        drop(db);
+
+        let loaded = UserDB::read_from_file(&path).unwrap();
+        assert!(loaded.username_exists("user7"));
+        assert!(loaded.email_exists("user7@example.com"));
+        assert!(loaded.uid_exists(7));
+        assert_eq!(loaded.find_user_by_token("tok-persist").unwrap().uid, 7);
+        let _ = fs::remove_file(&path);
     }
 }
 

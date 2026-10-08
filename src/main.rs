@@ -25,10 +25,32 @@ use tokio::{
 };
 
 
-async fn reload_db(db: web::Data<SharedUserDB>) -> Result<HttpResponse, actix_web::Error> {
+/// Resolve the logged-in user's uid from the request's auth cookie.
+/// Returns `None` when there is no cookie or the token is unknown.
+async fn authenticated_uid(
+    db: &web::Data<SharedUserDB>,
+    req: &actix_web::HttpRequest,
+) -> Option<isize> {
+    let token = req.cookie("auth_token")?;
+    let db_read = db.read().await;
+    db_read
+        .find_user_by_token(token.value())
+        .map(|user| user.uid)
+}
+
+async fn reload_db(
+    db: web::Data<SharedUserDB>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse, actix_web::Error> {
+    // This endpoint replaces the live database; never serve it anonymously.
+    let Some(uid) = authenticated_uid(&db, &req).await else {
+        warn!("Rejected unauthenticated /reloaddb request.");
+        return Ok(HttpResponse::Unauthorized().body("Authentication required."));
+    };
+
     let db_file_path = storage::USERDB.as_str();
 
-    info!("Reloading database from file: {}", db_file_path);
+    info!("Reloading database from file: {} (requested by uid {})", db_file_path, uid);
 
     let new_db = match UserDB::read_from_file(db_file_path) {
         Ok(db) => db,
@@ -104,7 +126,7 @@ async fn page_404(tera: web::Data<Tera>) -> Result<HttpResponse, actix_web::Erro
     })?;
 
     warn!("Page not found, returning 404.");
-    Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
+    Ok(HttpResponse::NotFound().content_type("text/html").body(rendered))
 }
 
 type SharedUserDB = Arc<RwLock<UserDB>>;
@@ -629,4 +651,94 @@ async fn shutdown_procedure(shared_db: SharedUserDB) {
     }
 
     info!("Shutdown complete.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::user::User;
+    use actix_web::{http::StatusCode, test::TestRequest};
+
+    fn test_user_with_token(uid: isize, token: &str) -> (UserDB, String) {
+        let file_path = std::env::temp_dir()
+            .join(format!(
+                "reloaddb-test-{}-{}.json",
+                std::process::id(),
+                uid
+            ))
+            .to_string_lossy()
+            .to_string();
+        let mut db = UserDB::empty_for_test(&file_path);
+        db.insert_for_test(User {
+            uid,
+            username: format!("user{}", uid),
+            email: format!("user{}@example.com", uid),
+            password: "hashed".to_string(),
+            token: None,
+            is_updating: false,
+        });
+        db.set_user_token(uid, token.to_string());
+        (db, file_path)
+    }
+
+    #[actix_web::test]
+    async fn authenticated_uid_resolves_valid_token_only() {
+        let (db, file_path) = test_user_with_token(11, "valid-token");
+        let data = web::Data::new(Arc::new(RwLock::new(db)));
+
+        let authed = TestRequest::default()
+            .cookie(CookieBuilder::new("auth_token", "valid-token").finish())
+            .to_http_request();
+        assert_eq!(authenticated_uid(&data, &authed).await, Some(11));
+
+        let anonymous = TestRequest::default().to_http_request();
+        assert_eq!(authenticated_uid(&data, &anonymous).await, None);
+
+        let forged = TestRequest::default()
+            .cookie(CookieBuilder::new("auth_token", "no-such-token").finish())
+            .to_http_request();
+        assert_eq!(authenticated_uid(&data, &forged).await, None);
+
+        drop(data);
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[actix_web::test]
+    async fn reload_db_rejects_unauthenticated_request() {
+        let (db, file_path) = test_user_with_token(12, "valid-token");
+        let data = web::Data::new(Arc::new(RwLock::new(db)));
+
+        let req = TestRequest::default().to_http_request();
+        let resp = reload_db(data.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        drop(data);
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[actix_web::test]
+    async fn reload_db_accepts_authenticated_request() {
+        // Seed the on-disk database that /reloaddb loads.
+        let (mut seed_db, file_path) = test_user_with_token(13, "valid-token");
+        seed_db.write_to_file().unwrap();
+        drop(seed_db);
+        std::env::set_var("USERDB", &file_path);
+
+        let (db, _) = test_user_with_token(13, "valid-token");
+        let data = web::Data::new(Arc::new(RwLock::new(db)));
+
+        let req = TestRequest::default()
+            .cookie(CookieBuilder::new("auth_token", "valid-token").finish())
+            .to_http_request();
+        let resp = reload_db(data.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The live db was replaced with the file content.
+        let db_read = data.read().await;
+        assert!(db_read.username_exists("user13"));
+        drop(db_read);
+
+        drop(data);
+        let _ = fs::remove_file(&file_path);
+    }
 }

@@ -6,7 +6,12 @@ entryPoints:
 
 api:
   dashboard: true
-  insecure: true
+  # Never expose the dashboard/API without authentication: it leaks the
+  # full routing table, including per-user auth tokens in router rules.
+  # With `insecure: false` and no dashboard router defined, the dashboard
+  # is disabled. To inspect it locally, use `docker exec` or temporarily
+  # add a localhost-only router with basic auth.
+  insecure: false
 
 providers:
   docker:
