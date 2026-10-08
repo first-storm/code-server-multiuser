@@ -197,6 +197,15 @@ impl UserDB {
         token
     }
 
+    /// Clears every `is_updating` flag. Called at startup: update tasks
+    /// that died with the previous process must not leave their users
+    /// stuck in the updating state forever.
+    pub fn clear_updating_flags(&mut self) {
+        for user in self.users.values_mut() {
+            user.is_updating = false;
+        }
+    }
+
     /// Routes a user's container in Traefik under the given session token.
     pub fn register_traefik_instance(&mut self, uid: isize, token: &str) -> io::Result<()> {
         self.traefik_instances
@@ -681,6 +690,23 @@ mod tests {
             "edited@example.com"
         );
         drop(loaded);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clear_updating_flags_resets_every_flag() {
+        let path = temp_path("db");
+        let mut db = UserDB::empty_for_test(&path);
+        db.insert_for_test(test_user(7));
+        db.insert_for_test(test_user(8));
+        db.find_user_by_uid_mut(7).unwrap().is_updating = true;
+        db.find_user_by_uid_mut(8).unwrap().is_updating = true;
+
+        db.clear_updating_flags();
+
+        assert!(!db.find_user_by_uid(7).unwrap().is_updating);
+        assert!(!db.find_user_by_uid(8).unwrap().is_updating);
+        drop(db);
         let _ = fs::remove_file(&path);
     }
 

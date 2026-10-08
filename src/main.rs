@@ -834,6 +834,11 @@ async fn main() -> io::Result<()> {
         ))
     };
 
+    // Update tasks that died with the previous process leave stale
+    // `is_updating` flags persisted in the database; clear them so those
+    // users are not stuck in the updating state forever.
+    shared_database.write().await.clear_updating_flags();
+
     // Spawn a background task for container expiration checking
     tokio::spawn(expiration_checker(shared_database.clone()));
 
